@@ -82,6 +82,19 @@ class SchemasAreReachableTest(unittest.TestCase):
         self.assertTrue((schemas_dir() / "envelope.schema.json").is_file())
         self.assertTrue((schemas_dir() / "providers.schema.json").is_file())
 
+    def test_schemas_live_inside_the_package_so_a_vendored_copy_carries_them(self):
+        """Copying `deckflow_core/` alone must be enough.
+
+        Schemas beside the package rather than inside it survive a wheel build
+        (via force-include) but silently vanish when a Skill vendors the
+        package directory — which is a supported way to consume core.
+        """
+        import deckflow_core
+
+        package_root = Path(deckflow_core.__file__).parent
+        self.assertEqual(schemas_dir().parent, package_root)
+        self.assertEqual(schemas_dir(), package_root / "schemas")
+
 
 class EnvelopeConformsTest(unittest.TestCase):
     def setUp(self):

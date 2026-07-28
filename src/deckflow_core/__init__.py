@@ -22,13 +22,11 @@ SCHEMA_VERSION = 1
 def schemas_dir() -> Path:
     """Locate the published JSON Schemas.
 
-    They sit beside the package once installed, and one level up in a source
-    checkout; resolving both keeps the contract tests honest in either layout.
+    They live inside the package rather than beside it, so this is one path
+    with no fallback: a vendored copy of `deckflow_core/` carries its schemas
+    with it, and there is no layout in which they can go missing.
     """
-    packaged = Path(__file__).parent / "schemas"
-    if packaged.is_dir():
-        return packaged
-    return Path(__file__).resolve().parents[2] / "schemas"
+    return Path(__file__).parent / "schemas"
 
 
 __all__ = ["__version__", "SCHEMA_VERSION", "schemas_dir"]

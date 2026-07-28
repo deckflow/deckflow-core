@@ -129,9 +129,6 @@ jobs:
           python3 -m pip install --target ~/.deckflow/core/${version} deckflow-core==${version}
           PYTHONPATH=~/.deckflow/core/${version} python3 -m deckflow_core providers
           \`\`\`
-
-          See [INTEGRATION.md](https://github.com/${{ github.repository }}/blob/${tag}/INTEGRATION.md)
-          for the integration contract.
           EOF
           )
           if gh release view "$tag" >/dev/null 2>&1; then
