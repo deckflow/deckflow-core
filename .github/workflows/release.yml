@@ -1,0 +1,141 @@
+name: release
+
+# Tagging is the release trigger. The tag must match the version in
+# pyproject.toml — a mismatch fails the build rather than shipping a wheel
+# whose filename disagrees with the tag someone will pin against.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve and verify the version
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          declared=$(python -c "
+          import tomllib, pathlib
+          print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])
+          ")
+          if [ "$version" != "$declared" ]; then
+            echo "::error::tag $tag implies version $version, but pyproject.toml declares $declared"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the provider matrix tracks this version
+        run: |
+          set -euo pipefail
+          python -c "
+          import json, pathlib, sys
+          matrix = json.loads(pathlib.Path('src/deckflow_core/providers/providers.json').read_text())
+          declared = '${{ steps.version.outputs.version }}'
+          if matrix['core_version'] != declared:
+              sys.exit(f\"providers.json core_version {matrix['core_version']} != {declared}\")
+          floating = [n for n, s in matrix['providers'].items() if s['version'] in ('latest', '*', '')]
+          if floating:
+              sys.exit(f'providers are not pinned: {floating}')
+          print('provider matrix is pinned and current')
+          "
+
+      - name: Run the test suite
+        run: PYTHONPATH=src:tests python -m unittest discover -s tests
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Install the built wheel into a clean directory and smoke-test it
+        run: |
+          set -euo pipefail
+          python -m pip install --target /tmp/smoke --no-input dist/*.whl
+          actual=$(PYTHONPATH=/tmp/smoke python -m deckflow_core --version)
+          echo "$actual"
+          case "$actual" in
+            *"${{ steps.version.outputs.version }}"*) ;;
+            *) echo "::error::installed wheel reports '$actual'"; exit 1 ;;
+          esac
+          PYTHONPATH=/tmp/smoke python -m deckflow_core providers --json > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # PyPI trusted publishing: the workflow proves its identity via OIDC, so
+      # there is no long-lived API token to store, leak, or rotate.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          version="${{ needs.build.outputs.version }}"
+          notes=$(cat <<EOF
+          \`\`\`bash
+          pip install deckflow-core==${version}
+          \`\`\`
+
+          Or without touching a virtualenv — this works on a PEP 668
+          externally-managed interpreter:
+
+          \`\`\`bash
+          python3 -m pip install --target ~/.deckflow/core/${version} deckflow-core==${version}
+          PYTHONPATH=~/.deckflow/core/${version} python3 -m deckflow_core providers
+          \`\`\`
+
+          See [INTEGRATION.md](https://github.com/${{ github.repository }}/blob/${tag}/INTEGRATION.md)
+          for the integration contract.
+          EOF
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "$tag" --notes "$notes"
+          fi

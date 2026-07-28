@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deckflow.dev/schemas/core/envelope.schema.json",
+  "title": "deckflow-core result envelope",
+  "description": "The single result shape every deckflow-core command returns on stdout under --json and in --report.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "command",
+    "core_version",
+    "status",
+    "started_at",
+    "finished_at",
+    "providers",
+    "inputs",
+    "outputs",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "command": { "type": "string", "minLength": 1 },
+    "core_version": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["succeeded", "partial", "cancelled", "failed"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "providers": { "type": "array", "items": { "$ref": "#/$defs/provider" } },
+    "inputs": { "type": "array", "items": { "$ref": "#/$defs/fileRecord" } },
+    "outputs": { "type": "array", "items": { "type": "object" } },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "provider_result": {
+      "description": "The provider's own payload, carried verbatim so normalization is lossless."
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "required": ["name", "package", "pinned_version", "resolution", "status", "acquired", "pinned"],
+      "properties": {
+        "name": { "enum": ["extract", "editor", "deckhtml"] },
+        "package": { "type": "string" },
+        "pinned_version": { "type": "string" },
+        "version": { "type": ["string", "null"] },
+        "resolution": { "enum": ["override", "ambient", "managed-cache", "acquired", "missing"] },
+        "status": { "enum": ["ready", "not-acquired", "blocked"] },
+        "acquired": {
+          "type": "boolean",
+          "description": "True when this run downloaded the provider."
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "False when a --provider-spec or env override replaced the matrix pin; release verification rejects such runs."
+        },
+        "public": {
+          "type": "boolean",
+          "description": "False when the package is reachable only with organisation credentials, so an external integrator cannot acquire it."
+        },
+        "blocked_by": { "type": "string" },
+        "path": { "type": "string" },
+        "unlocks": { "type": "array", "items": { "type": "string" } },
+        "approx_mb": { "type": "integer" }
+      }
+    },
+    "fileRecord": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["rule_id", "severity", "message"],
+      "properties": {
+        "rule_id": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "message": { "type": "string" },
+        "location": { "type": "string" },
+        "expected": { "type": "string" },
+        "actual": { "type": "string" },
+        "recovery": { "type": "string" }
+      }
+    }
+  }
+}

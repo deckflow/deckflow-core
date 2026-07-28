@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deckflow.dev/schemas/core/providers.schema.json",
+  "title": "deckflow-core provider pin matrix",
+  "description": "providers.json — the exact provider versions this core release was tested against. Changing any pin is a core release.",
+  "type": "object",
+  "required": ["schema_version", "core_version", "providers"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "core_version": { "type": "string" },
+    "providers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/spec" }
+    }
+  },
+  "$defs": {
+    "spec": {
+      "type": "object",
+      "required": ["kind", "package", "version", "compatible", "bin", "unlocks", "approx_mb"],
+      "properties": {
+        "kind": { "enum": ["npm", "python"] },
+        "package": { "type": "string" },
+        "module": {
+          "type": "string",
+          "description": "python providers only: the importable module, invoked as `python -m <module>` with PYTHONPATH pointing at the --target directory."
+        },
+        "version": { "type": "string" },
+        "compatible": {
+          "type": "string",
+          "description": "Whitespace-separated range terms, e.g. '>=0.3.2 <0.4.0'. An ambient install outside this range is ignored in favour of the managed copy."
+        },
+        "bin": { "type": "string" },
+        "registry": {
+          "type": "string",
+          "description": "npm providers only: the intended public registry for THIS package. Pinned as the scope registry; the default registry always stays on npmjs so transitive dependencies keep resolving and a user .npmrc cannot hijack the pin."
+        },
+        "fallback_registry": {
+          "type": "string",
+          "description": "npm providers only: tried when the primary registry fails. Lets the matrix name the intended public registry before the package is published there; once it is, the fallback simply stops being reached."
+        },
+        "index_url": { "type": "string", "description": "python providers only: the intended public index." },
+        "source": {
+          "type": "string",
+          "description": "python providers only: fallback origin (e.g. a git ref) tried when the index install fails. Its ref must name the pinned version. Dropped when a --provider-spec overrides the version."
+        },
+        "public": {
+          "type": "boolean",
+          "description": "False while the package is reachable only with organisation credentials. Such a provider emits PROVIDER_NOT_PUBLICLY_PUBLISHED, because an integrator outside the organisation cannot acquire it.",
+          "default": true
+        },
+        "unlocks": { "type": "array", "items": { "type": "string" } },
+        "approx_mb": { "type": "integer", "minimum": 0 },
+        "provides": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Runtimes this provider brings with it, e.g. chromium-runtime. Core never bundles a browser of its own."
+        }
+      }
+    }
+  }
+}

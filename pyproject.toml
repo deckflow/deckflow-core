@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deckflow-core"
+version = "0.1.0"
+description = "Deckflow capability broker: one CLI over deckflow-extract, html-editor and deckhtml, with on-demand provider acquisition."
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+keywords = ["deckflow", "presentation", "pptx", "html", "cli", "extraction"]
+authors = [{ name = "DeckFlow Contributors" }]
+
+# Zero third-party dependencies is a hard constraint, not a preference: it is
+# what makes the package vendorable into a Skill and installable with
+# `pip install --target` on a PEP 668 externally-managed interpreter.
+dependencies = []
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Text Processing :: Markup :: HTML",
+]
+
+[project.urls]
+Homepage = "https://github.com/deckflow/deckflow-core"
+Repository = "https://github.com/deckflow/deckflow-core"
+Issues = "https://github.com/deckflow/deckflow-core/issues"
+Changelog = "https://github.com/deckflow/deckflow-core/releases"
+
+[project.scripts]
+deckflow = "deckflow_core.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deckflow_core"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "deckflow_core/schemas"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "schemas", "tests", "README.md", "INTEGRATION.md", "LICENSE", "pyproject.toml"]
