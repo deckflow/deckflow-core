@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,6 +125,7 @@ class PathContainmentTest(unittest.TestCase):
             self.assertEqual(caught.exception.diagnostic.rule_id, "PATH_ESCAPES_ROOT")
             self.assertEqual(caught.exception.exit_code, 3)
 
+    @unittest.skipIf(os.name == "nt", "creating symlinks on Windows needs elevation")
     def test_symlink_escape_is_rejected(self):
         with tempfile.TemporaryDirectory() as outer:
             root = Path(outer) / "root"

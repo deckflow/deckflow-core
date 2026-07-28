@@ -224,6 +224,7 @@ class ResolutionLadderTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.diagnostic.rule_id, "PROVIDER_OVERRIDE_MISSING")
 
+    @unittest.skipIf(os.name == "nt", "resolves a POSIX shell script as the provider binary")
     def test_override_wins_over_everything(self):
         fake = self.home / "fake-deckhtml"
         fake.parent.mkdir(parents=True, exist_ok=True)
@@ -251,6 +252,7 @@ class ResolutionLadderTest(unittest.TestCase):
         self.assertTrue(resolver._may_acquire("auto"))
         self.assertFalse(resolver._may_acquire("never"))
 
+    @unittest.skipIf(os.name == "nt", "resolves a POSIX shell script as the provider binary")
     def test_incompatible_ambient_is_ignored_with_a_warning(self):
         stale = self.home / "stale-deckhtml"
         stale.parent.mkdir(parents=True, exist_ok=True)
@@ -262,6 +264,7 @@ class ResolutionLadderTest(unittest.TestCase):
         self.assertEqual(result.diagnostics[0].rule_id, "PROVIDER_VERSION_MISMATCH")
         self.assertEqual(result.diagnostics[0].severity, "warning")
 
+    @unittest.skipIf(os.name == "nt", "resolves a POSIX shell script as the provider binary")
     def test_compatible_ambient_is_used_as_is(self):
         # Derive the version from the matrix so a pin bump does not break this.
         pinned = matrix.get("deckhtml").version
