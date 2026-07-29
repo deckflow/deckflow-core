@@ -178,7 +178,9 @@ class CredentialWithholdingTest(unittest.TestCase):
             env = parse_cmd._environ(cloud=True)
             self.assertIn("DECKFLOW_API_KEY", env)
             self.assertNotIn("DECKFLOW_NO_STORED_CREDENTIALS", env)
-            self.assertEqual(env["DECKFLOW_CONFIG_DIR"], "/tmp/deckflow-home")
+            self.assertEqual(
+                env["DECKFLOW_CONFIG_DIR"], str(Path("/tmp/deckflow-home"))
+            )
 
 
 class StatusMappingTest(unittest.TestCase):

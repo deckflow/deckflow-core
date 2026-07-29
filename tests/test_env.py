@@ -214,7 +214,7 @@ class CloudProbeTest(unittest.TestCase):
 
         self.assertEqual(
             run.call_args.kwargs["env"]["DECKFLOW_CONFIG_DIR"],
-            "/tmp/deckflow-home",
+            str(Path("/tmp/deckflow-home")),
         )
 
     def test_an_unparseable_answer_is_unknown_not_unconfigured(self):
