@@ -15,27 +15,33 @@ from deckflow_core.exits import CoreError
 from deckflow_core.fsutil import (
     atomic_write_text,
     require_empty_dir,
-    require_writable_target,
     resolve_within,
-    sha256_bytes,
+    sha256_file,
 )
 
 
 class EnvelopeTest(unittest.TestCase):
     def test_required_fields_present(self):
-        payload = Envelope(command="providers").to_json()
+        payload = Envelope(command="env check").to_json()
         for key in (
             "schema_version", "command", "core_version", "status",
-            "started_at", "finished_at", "providers", "inputs", "outputs", "diagnostics",
+            "started_at", "finished_at", "extract", "inputs", "outputs", "diagnostics",
         ):
             self.assertIn(key, payload)
         self.assertEqual(payload["schema_version"], SCHEMA_VERSION)
 
     def test_rejects_invented_status(self):
-        envelope = Envelope(command="providers")
+        envelope = Envelope(command="env check")
         envelope.status = "mostly-fine"
         with self.assertRaises(ValueError):
             envelope.to_json()
+
+    def test_no_status_the_code_cannot_reach(self):
+        # `cancelled` needed a long-running session; core no longer runs one,
+        # and a status nothing emits only earns dead branches in callers.
+        from deckflow_core.envelope import STATUSES
+
+        self.assertEqual(set(STATUSES), {"succeeded", "partial", "failed"})
 
     def test_provider_result_is_carried_verbatim(self):
         native = {"status": "repairable", "gaps": [{"kind": "tables"}], "decision": {"usable": True}}
@@ -75,16 +81,17 @@ class FailureSummaryTest(unittest.TestCase):
 
     def test_boilerplate_is_dropped_in_favour_of_the_real_error(self):
         stderr = (
-            "npm warn deprecated foo@1.0.0\n"
-            "npm error code E404\n"
-            "npm error 404 No match found for version 0.3.2\n"
-            "npm error A complete log of this run can be found in: /Users/x/.npm/_logs/x.log\n"
+            "WARNING: Running pip as the 'root' user can result in broken permissions.\n"
+            "ERROR: Could not find a version that satisfies the requirement "
+            "deckflow-extract==0.2.0\n"
+            "ERROR: No matching distribution found for deckflow-extract==0.2.0\n"
+            "[notice] A new release of pip is available: 24.0 -> 25.1\n"
         )
         summary = summarize_output(stderr)
-        self.assertIn("E404", summary)
-        self.assertIn("No match found", summary)
-        self.assertNotIn("complete log", summary)
-        self.assertNotIn("deprecated", summary)
+        self.assertIn("No matching distribution", summary)
+        self.assertIn("deckflow-extract==0.2.0", summary)
+        self.assertNotIn("new release of pip", summary)
+        self.assertNotIn("broken permissions", summary)
 
     def test_duplicate_lines_collapse(self):
         self.assertEqual(summarize_output("same\nsame\nsame"), "same")
@@ -106,7 +113,7 @@ class VersionRangeTest(unittest.TestCase):
         self.assertFalse(versions.satisfies("unknown", ">=0.1.0"))
 
     def test_extracts_version_from_noisy_cli_output(self):
-        self.assertEqual(versions.normalize("deckhtml version 0.3.2 (local)"), "0.3.2")
+        self.assertEqual(versions.normalize("deckflow-extract version 0.2.0 (local)"), "0.2.0")
         self.assertEqual(versions.normalize("v1.2"), "1.2.0")
 
     def test_release_outranks_its_prerelease(self):
@@ -163,20 +170,16 @@ class AtomicWriteTest(unittest.TestCase):
             self.assertEqual(leftovers, [])
 
     def test_sha256_is_stable(self):
-        self.assertEqual(sha256_bytes(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        with tempfile.TemporaryDirectory() as root:
+            empty = Path(root) / "empty"
+            empty.write_bytes(b"")
+            self.assertEqual(
+                sha256_file(empty),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            )
 
 
 class OverwritePolicyTest(unittest.TestCase):
-    def test_existing_file_needs_overwrite(self):
-        with tempfile.TemporaryDirectory() as root:
-            target = Path(root) / "deck.pptx"
-            target.write_bytes(b"x")
-            with self.assertRaises(CoreError) as caught:
-                require_writable_target(target, overwrite=False)
-            self.assertEqual(caught.exception.diagnostic.rule_id, "OUTPUT_EXISTS")
-            self.assertEqual(caught.exception.exit_code, 6)
-            require_writable_target(target, overwrite=True)
-
     def test_non_empty_output_dir_needs_overwrite(self):
         with tempfile.TemporaryDirectory() as root:
             target = Path(root) / "out"

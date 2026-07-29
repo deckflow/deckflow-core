@@ -1,9 +1,8 @@
 """`deckflow parse` — one local file into a Parse Bundle via the extract provider.
 
-The thinnest of the three commands, deliberately. `deckflow-extract` already
-has the best-shaped contract of any provider — a real status machine, a
-fidelity vector, gap accounting and executable recommendations — so core adds
-boundaries and gets out of the way:
+Deliberately thin. `deckflow-extract` already has a well-shaped contract — a
+real status machine, a fidelity vector, gap accounting and executable
+recommendations — so core adds boundaries and gets out of the way:
 
 - the Parse Bundle is passed through untouched. Core does not rewrite
   `document.md`, recompute fidelity, or invent a second artifact vocabulary;
@@ -29,9 +28,9 @@ from ..envelope import (
     file_record,
 )
 from ..exits import EXIT_EXECUTION, EXIT_INPUT, EXIT_OK, EXIT_OUTPUT, CoreError
-from ..fsutil import deckflow_home, require_empty_dir, resolve_within, sha256_file
-from ..providers import matrix
-from ..providers import resolve as resolver
+from ..extract import resolve as extract_resolve
+from ..fsutil import require_empty_dir, resolve_within, sha256_file
+from ..home import credential_env, deckflow_home
 
 COMMAND = "parse"
 _URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
@@ -92,7 +91,7 @@ def _resolve_input(raw: str) -> Path:
     return path.resolve()
 
 
-def _build_command(resolution: resolver.Resolution, source: Path,
+def _build_command(resolution: extract_resolve.Extract, source: Path,
                    out: Path, options: Any) -> list[str]:
     command = [
         *resolution.command, "parse", str(source),
@@ -259,14 +258,12 @@ def run(options: Any) -> tuple[Envelope, str | None, int]:
     _require_input_outside_output(source, out)
     _require_safe_output(out, overwrite=options.overwrite)
 
-    spec = matrix.get("extract", options.provider_specs)
-    resolution = resolver.resolve(
-        spec,
-        policy=resolver.policy_from(options.provider_install),
-        bin_overrides=options.provider_bins,
+    resolution = extract_resolve.resolve(
+        bin_override=options.extract_bin,
+        offline=extract_resolve.offline_from(options.offline),
         home=deckflow_home(),
     )
-    envelope.providers = [resolution.to_json()]
+    envelope.extract = resolution.to_json()
     envelope.extend(resolution.diagnostics)
     envelope.inputs = [
         file_record(str(source), sha256=sha256_file(source), size=source.stat().st_size)
@@ -337,26 +334,43 @@ def run(options: Any) -> tuple[Envelope, str | None, int]:
         return envelope, None, EXIT_INPUT
 
     envelope.outputs = _bundle_outputs(out)
-    human = None if options.json else (
+    human = (
         f"{provider_status} -> {out}\n"
         f"tier={provider_result.get('tier')} "
         f"recommended={(provider_result.get('decision') or {}).get('recommended')}"
-    )
+    ) if options.human else None
     return envelope, human, EXIT_OK
 
 
-_CLOUD_CREDENTIALS = ("DECKFLOW_API_KEY", "DECKFLOW_SPACE_ID", "DECKHTML_API_KEY")
+_CLOUD_CREDENTIALS = (
+    "DECKFLOW_API_KEY", "DECKOPS_API_KEY",
+    "DECKFLOW_TOKEN", "DECKOPS_TOKEN",
+    "DECKFLOW_SPACE_ID", "DECKOPS_SPACE_ID",
+)
 
 
 def _environ(*, cloud: bool) -> dict[str, str]:
     """Withhold cloud credentials unless cloud mode was explicitly requested.
 
-    `--mode local` already forbids uploading. Removing the keys as well means a
-    future change in provider defaults cannot turn a local parse into one that
-    ships the user's source material off the machine.
+    `--mode local` already forbids uploading. Removing the credentials as well
+    means a future change in provider defaults cannot turn a local parse into
+    one that ships the user's source material off the machine.
+
+    Since deckflow-extract 0.3 the provider also reads credentials from
+    `~/.deckflow/credentials`, the file it shares with DeckHTML — so removing
+    variables no longer removes anything on a machine where either tool has
+    been logged in. `DECKFLOW_NO_STORED_CREDENTIALS` is the provider's switch
+    for exactly this: it makes the environment the only source of truth, which
+    is what the stripping above assumes.
     """
     import os
 
     if cloud:
-        return dict(os.environ)
-    return {key: value for key, value in os.environ.items() if key not in _CLOUD_CREDENTIALS}
+        environ = dict(os.environ)
+    else:
+        environ = {
+            key: value for key, value in os.environ.items() if key not in _CLOUD_CREDENTIALS
+        }
+        environ["DECKFLOW_NO_STORED_CREDENTIALS"] = "1"
+    environ.update(credential_env())
+    return environ

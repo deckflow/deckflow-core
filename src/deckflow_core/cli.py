@@ -1,13 +1,17 @@
 """CLI entry point.
 
-Two invariants the tests hold to:
+Three invariants the tests hold to:
 
-- stdout carries the machine contract and nothing else.  Business commands emit
-  exactly one JSON object; `providers` prints a human table by default and
-  switches to the strict envelope under `--json`.  Progress, prompts and errors
-  go to stderr.
-- a deferred command is absent, not stubbed.  `parse`, `editor` and
-  `export pptx` are unknown arguments in v0.1 and exit 2.
+- **stdout carries the machine contract.**  Every command emits exactly one
+  JSON object; progress, prompts and errors go to stderr.  JSON is the default
+  rather than an opt-in `--json`, because every caller of this CLI is an agent
+  or a script; `--human` is the opt-in for people.
+- **a command core does not implement is absent, not stubbed.**  `editor`,
+  `export` and `validate` are unknown arguments and exit 2, because a name
+  visible in `--help` lets a caller believe the capability exists here.
+- **`env check` exits 0 whenever the check ran.**  It is the first line of a
+  Skill's prerequisites; a non-zero exit there tells an agent the Skill is
+  broken and sends it off to repair a machine that is fine.
 """
 
 from __future__ import annotations
@@ -18,27 +22,29 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
-from .commands import editor as editor_cmd, export_pptx, parse as parse_cmd, providers_cmd
+from .commands import auth as auth_cmd
+from .commands import env as env_cmd
+from .commands import parse as parse_cmd
+from .commands import update as update_cmd
 from .diagnostics import Diagnostic
 from .envelope import STATUS_FAILED, Envelope
 from .exits import EXIT_INTERRUPT, EXIT_OK, EXIT_OUTPUT, EXIT_USAGE, CoreError
 from .fsutil import atomic_write_text
-from .providers import resolve as resolver
 
 _EPILOG = """\
 network policy:
-  Core reaches the network for exactly one purpose: acquiring a pinned provider
-  into its own managed cache. Source files, HTML, assets and PPTX are never
-  uploaded, and cloud provider modes are only used when you ask for them.
+  Core reaches the network to acquire its pinned provider, and for `update`.
+  Source files and extracted content are never uploaded, and the provider's
+  cloud mode is only used when you ask for it.
 
 writes:
-  providers install/remove touch only $DECKFLOW_HOME/providers (default
-  ~/.deckflow/providers). Nothing is installed globally and no project
-  directory is modified.
+  env setup/clean and update touch only $DECKFLOW_HOME (default ~/.deckflow).
+  `auth` writes the shared credential file through the provider, never directly.
+  Nothing is installed globally and no project directory is modified.
 
 exit codes:
   0 succeeded/partial  2 usage  3 input/precondition
-  4 contract  5 provider or execution failure  6 output conflict  130 interrupt
+  5 provider or execution failure  6 output conflict  130 interrupt
   Read the JSON `status`; the exit code only classifies why a run ended.
 """
 
@@ -52,72 +58,92 @@ class _Parser(argparse.ArgumentParser):
         raise SystemExit(EXIT_USAGE)
 
 
-def _key_value(values: Sequence[str] | None, flag: str) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for item in values or ():
-        if "=" not in item:
-            raise CoreError(
-                Diagnostic(
-                    rule_id="CLI_USAGE",
-                    severity="error",
-                    message=f"{flag} expects <provider>=<value>.",
-                    expected=f"{flag} deckhtml=/path/to/bin",
-                    actual=item,
-                    recovery=f"Re-run with {flag} <provider>=<value>.",
-                ),
-                exit_code=EXIT_USAGE,
-            )
-        name, _, value = item.partition("=")
-        parsed[name.strip()] = value.strip()
-    return parsed
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="deckflow",
         description=(
-            "Deckflow capability broker. One CLI over deckflow-extract, "
-            "@deckflow/html-editor and @deckflow/deckhtml, with providers acquired on demand."
+            "Deckflow capability broker. One CLI over deckflow-extract, acquired on demand. "
+            "Deck editing and PPTX export are not brokered here — call html-editor and "
+            "deckhtml directly."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"deckflow-core {__version__}")
 
+    # Every common flag suppresses its default so that `deckflow env --human
+    # check` works: without this, the subparser's own default would overwrite
+    # the value the parent already parsed. Defaults are applied in _normalize.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
-        "--provider-install", choices=list(resolver.POLICIES), default=None,
-        help="on-demand acquisition policy (default: auto; env DECKFLOW_PROVIDER_INSTALL). "
-             "ask degrades to never without a TTY",
+        "--human", action="store_true", default=argparse.SUPPRESS,
+        help="print a human-readable summary instead of the JSON envelope",
     )
     common.add_argument(
-        "--provider-bin", action="append", metavar="NAME=PATH", dest="provider_bin",
-        help="use this executable for a provider instead of resolving it (repeatable)",
+        "--report", metavar="PATH", default=argparse.SUPPRESS,
+        help="also write the envelope to this JSON file",
     )
     common.add_argument(
-        "--provider-spec", action="append", metavar="NAME=VERSION", dest="provider_spec",
-        help="override a pinned provider version; marks the run as unpinned (repeatable)",
+        "--skill-root", metavar="DIR", dest="skill_root", default=argparse.SUPPRESS,
+        help="the calling skill's directory (default: $DECKFLOW_SKILL_ROOT)",
     )
-    common.add_argument("--json", action="store_true", help="emit the strict JSON envelope on stdout")
-    common.add_argument("--report", metavar="PATH", help="also write the envelope to this JSON file")
+    common.add_argument(
+        "--offline", action="store_true", default=argparse.SUPPRESS,
+        help="never reach the network; a missing provider becomes an error (env DECKFLOW_OFFLINE)",
+    )
+    common.add_argument(
+        "--extract-bin", metavar="PATH", dest="extract_bin", default=argparse.SUPPRESS,
+        help="use this deckflow-extract executable instead of resolving one "
+             "(env DECKFLOW_EXTRACT_BIN; for developing core and extract together)",
+    )
 
     subcommands = parser.add_subparsers(dest="command", metavar="<command>")
 
-    providers = subcommands.add_parser(
-        "providers", parents=[common],
-        help="show provider status, or install/remove a managed provider",
+    env = subcommands.add_parser(
+        "env", parents=[common],
+        help="check the environment, or prepare and clean the managed home",
         description=(
-            "Report what each provider resolves to and whether using it will download "
-            "anything. Without a subcommand this has no side effects."
+            "Without a subcommand this is `env check`: a side-effect-free report of what "
+            "this machine can do. It never downloads, never writes, and exits 0 whenever "
+            "the check itself ran."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    actions = providers.add_subparsers(dest="provider_action", metavar="<action>")
-    install = actions.add_parser("install", parents=[common], help="acquire a pinned provider into the managed cache")
-    install.add_argument("provider_name", metavar="<provider>", help="extract | editor | deckhtml")
-    remove = actions.add_parser("remove", parents=[common], help="delete a provider from the managed cache")
-    remove.add_argument("provider_name", metavar="<provider>", help="extract | editor | deckhtml")
+    env_actions = env.add_subparsers(dest="env_action", metavar="<action>")
+    env_actions.add_parser("check", parents=[common], help="report the environment; no side effects")
+    env_actions.add_parser("setup", parents=[common], help="acquire the pinned provider (~4MB)")
+    env_actions.add_parser("clean", parents=[common], help="remove the managed provider install")
+
+    auth = subcommands.add_parser(
+        "auth", parents=[common],
+        help="inspect or configure the Deckflow cloud credential",
+        description=(
+            "The credential lives in ~/.deckflow/credentials and is shared with DeckHTML. "
+            "Core never writes that file itself; every action here is forwarded to "
+            "deckflow-extract, which owns its merge rules. `status` never downloads "
+            "anything: an unacquired provider reports cloud as unknown, not as unconfigured."
+        ),
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    auth_actions = auth.add_subparsers(dest="auth_action", metavar="<action>")
+    auth_actions.add_parser(
+        "status", parents=[common], help="report whether a cloud credential is configured",
+    )
+    login = auth_actions.add_parser(
+        "login", parents=[common], help="browser login; refused without an interactive terminal",
+    )
+    login.add_argument("--no-open", action="store_true", help="print the URL instead of opening a browser")
+    login.add_argument("--timeout", type=int, default=330, metavar="SECONDS")
+    set_key = auth_actions.add_parser(
+        "set-key", parents=[common], help="store a space worker secret; no browser needed",
+    )
+    set_key.add_argument("key", nargs="?", metavar="<key>", help="omit and pass --stdin instead")
+    set_key.add_argument(
+        "--stdin", action="store_true",
+        help="read the key from stdin, keeping it out of the process list and shell history",
+    )
 
     parse = subcommands.add_parser(
         "parse", parents=[common],
@@ -159,80 +185,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="overall extraction timeout (default: 900)",
     )
 
-    editor = subcommands.add_parser(
-        "editor", parents=[common],
-        help="open a loopback visual editor over the canonical pages",
+    update = subcommands.add_parser(
+        "update", parents=[common],
+        help="install a newer core beside the running one",
         description=(
-            "Start a local browser editor bound to 127.0.0.1 over deck/pages/*.html, and "
-            "report what the session changed. Long-running: stdout is NDJSON — a `ready` "
-            "event with the URL, then the final envelope as the last line. Press Ctrl-C to "
-            "end the session. Writes only the pages you edit; index.html, deck-head.html "
-            "and the build manifest are verified unchanged afterwards and the run fails if "
-            "they moved. Auditing is file-level (before/after page hashes plus an "
-            "element-identity check), not per operation — run the Skill's page and project "
-            "validators afterwards. Requires the editor provider, acquired on demand (~3MB)."
+            "Installs into ~/.deckflow/core/<version>/ and takes effect on the next run; "
+            "the running copy is never modified. The provider pin moves with core, so "
+            "there is no separate provider update."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    editor.add_argument("project", metavar="<project>", help="deck project root")
-    editor.add_argument("--page", metavar="SLIDE_ID", help="open this page first")
-    editor.add_argument("--port", type=int, default=0, metavar="N", help="0 picks a free port")
-    editor.add_argument("--open", action="store_true", help="also open the system browser")
-
-    export = subcommands.add_parser(
-        "export", parents=[], help="produce a derived output from a deck project",
-        description="Derived outputs. The canonical deck stays HTML; nothing here writes back to it.",
-    )
-    formats = export.add_subparsers(dest="export_format", metavar="<format>")
-    pptx = formats.add_parser(
-        "pptx", parents=[common],
-        help="convert a deck project's canonical pages into an editable PPTX",
-        description=(
-            "Convert deck/pages/*.html into a PPTX, in the order approved in deck-plan.json. "
-            "Runs locally: nothing is uploaded, and a cloud API key in the environment is "
-            "withheld from the converter rather than used. Writes only the target .pptx and "
-            "the optional --report; canonical pages, index.html, deck-head.html and the build "
-            "manifest are never modified. Requires the deckhtml provider, which is acquired on "
-            "demand (~45MB) unless --provider-install never. Only landscape-16-9 decks can be "
-            "exported; the converter cannot represent the other four stage sizes."
-        ),
-        epilog=_EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    pptx.add_argument("project", metavar="<project>", help="deck project root")
-    pptx.add_argument("--output", required=True, metavar="PATH", help="target .pptx path")
-    pptx.add_argument("--overwrite", action="store_true", help="replace an existing target")
-    pptx.add_argument("--browser", metavar="PATH", help="Chromium executable for the converter")
-    pptx.add_argument(
-        "--exclude", action="append", metavar="SELECTOR",
-        help="CSS selector for runtime/navigation elements to leave out (repeatable)",
-    )
-    pptx.add_argument(
-        "--timeout", type=int, default=900, metavar="SECONDS",
-        help="conversion timeout (default: 900)",
+    update.add_argument("--check", action="store_true", help="report whether an update exists; install nothing")
+    update_actions = update.add_subparsers(dest="update_target", metavar="<target>")
+    update_actions.add_parser(
+        "skill", parents=[common],
+        help="report the skill's version and who updates it (core never writes a skill)",
     )
 
     return parser
 
 
+_COMMON_DEFAULTS: dict[str, Any] = {
+    "human": False,
+    "report": None,
+    "skill_root": None,
+    "offline": False,
+    "extract_bin": None,
+}
+
+
 def _normalize(options: argparse.Namespace) -> argparse.Namespace:
-    options.provider_bins = _key_value(getattr(options, "provider_bin", None), "--provider-bin")
-    options.provider_specs = _key_value(getattr(options, "provider_spec", None), "--provider-spec")
-    options.provider_action = getattr(options, "provider_action", None)
-    options.provider_name = getattr(options, "provider_name", None)
-    # Validate the policy early so a bad value fails before any work happens.
-    resolver.policy_from(getattr(options, "provider_install", None))
+    for key, default in _COMMON_DEFAULTS.items():
+        if not hasattr(options, key):
+            setattr(options, key, default)
     return options
 
 
 def _prepare_report_path(options: argparse.Namespace) -> None:
-    """Resolve and validate the report before any provider or project can run.
+    """Resolve and validate the report before any provider can run.
 
-    A report is an output in its own right. It may not alias another output,
-    overwrite an input, or land inside the canonical ``project/deck`` tree.
-    Clearing ``options.report`` before validation also ensures that a rejected
-    report path is never used while emitting the failure envelope.
+    A report is an output in its own right. It may not alias another output or
+    overwrite an input. Clearing ``options.report`` before validation also
+    ensures that a rejected report path is never used while emitting the
+    failure envelope.
     """
     raw = getattr(options, "report", None)
     if not raw:
@@ -250,24 +246,12 @@ def _prepare_report_path(options: argparse.Namespace) -> None:
             conflicts.append((label, protected))
 
     protect("input", getattr(options, "input", None))
-    protect("output", getattr(options, "output", None))
-    protect("browser executable", getattr(options, "browser", None))
-    for name, path in getattr(options, "provider_bins", {}).items():
-        protect(f"{name} provider executable", path)
+    protect("extract executable", getattr(options, "extract_bin", None))
 
     if getattr(options, "command", None) == "parse":
         output_root = Path(options.out).expanduser().resolve()
         if report == output_root or output_root in report.parents:
             conflicts.append(("parse output directory", output_root))
-
-    project_value = getattr(options, "project", None)
-    if project_value:
-        project_root = Path(project_value).expanduser().resolve()
-        deck_root = project_root / "deck"
-        if report == deck_root or deck_root in report.parents:
-            conflicts.append(("canonical deck tree", deck_root))
-        for relative in ("deck-plan.json", "intent-detail.json"):
-            protect(f"project record {relative}", project_root / relative)
 
     if conflicts:
         label, protected = conflicts[0]
@@ -279,7 +263,7 @@ def _prepare_report_path(options: argparse.Namespace) -> None:
                 location=str(report),
                 expected="a distinct report path that cannot overwrite command inputs or outputs",
                 actual=f"same as or inside {protected}",
-                recovery="Choose a separate --report path outside the parse bundle and canonical deck tree.",
+                recovery="Choose a separate --report path outside the parse bundle.",
             ),
             exit_code=EXIT_OUTPUT,
         )
@@ -325,6 +309,14 @@ def _emit(envelope: Envelope, human: str | None, report: str | None) -> None:
         sys.stdout.write(human + "\n")
 
 
+_COMMANDS = {
+    "env": env_cmd.run,
+    "auth": auth_cmd.run,
+    "parse": parse_cmd.run,
+    "update": update_cmd.run,
+}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = list(sys.argv[1:] if argv is None else argv)
@@ -340,17 +332,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         options = _normalize(options)
         _prepare_report_path(options)
-        if options.command == "providers":
-            envelope, human, code = providers_cmd.run(options)
-        elif options.command == "editor":
-            envelope, human, code = editor_cmd.run(options)
-        elif options.command == "parse":
-            envelope, human, code = parse_cmd.run(options)
-        elif options.command == "export":
-            if getattr(options, "export_format", None) is None:
-                parser.parse_args(["export", "--help"])
-            envelope, human, code = export_pptx.run(options)
-        else:  # pragma: no cover - argparse rejects unknown commands first
+        handler = _COMMANDS.get(options.command)
+        if handler is None:  # pragma: no cover - argparse rejects unknown commands first
             raise CoreError(
                 Diagnostic(
                     rule_id="CLI_USAGE", severity="error",
@@ -359,6 +342,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 exit_code=EXIT_USAGE,
             )
+        envelope, human, code = handler(options)
         _emit(envelope, human, getattr(options, "report", None))
         return code
     except CoreError as error:

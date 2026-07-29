@@ -25,10 +25,6 @@ def sha256_file(path: Path, *, chunk: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def resolve_within(root: Path, candidate: Path) -> Path:
     """Resolve `candidate` and prove it stays inside `root`.
 
@@ -83,31 +79,6 @@ def atomic_write_text(path: Path, text: str) -> None:
     atomic_write_bytes(path, text.encode("utf-8"))
 
 
-def atomic_write_json(path: Path, payload: object) -> None:
-    import json
-
-    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-
-
-def require_writable_target(path: Path, *, overwrite: bool, kind: str = "file") -> Path:
-    """Refuse to clobber an existing output unless `--overwrite` was passed."""
-    path = Path(path)
-    if path.exists() and not overwrite:
-        raise CoreError(
-            Diagnostic(
-                rule_id="OUTPUT_EXISTS",
-                severity="error",
-                message=f"The target {kind} already exists.",
-                location=str(path),
-                expected="a new path, or an explicit --overwrite",
-                actual="an existing path",
-                recovery=f"Choose another --output path, or pass --overwrite to replace this {kind}.",
-            ),
-            exit_code=EXIT_OUTPUT,
-        )
-    return path
-
-
 def require_empty_dir(path: Path, *, overwrite: bool) -> Path:
     """An output directory must be absent or empty; `--overwrite` clears it."""
     path = Path(path)
@@ -143,13 +114,3 @@ def require_empty_dir(path: Path, *, overwrite: bool) -> Path:
 
 def remove_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
-
-
-def deckflow_home() -> Path:
-    """Root for core's managed installs.
-
-    Shared with `deckflow-extract`'s engine sidecars and `deckhtml`'s
-    credentials, but core only ever writes its own subdirectories.
-    """
-    override = os.environ.get("DECKFLOW_HOME")
-    return Path(override).expanduser() if override else Path.home() / ".deckflow"

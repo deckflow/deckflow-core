@@ -62,17 +62,13 @@ def sort_diagnostics(diagnostics: Iterable[Diagnostic]) -> list[Diagnostic]:
     )
 
 
-def has_error(diagnostics: Iterable[Diagnostic]) -> bool:
-    return any(d.severity == "error" for d in diagnostics)
-
-
-# Boilerplate a package manager prints on every failure. Keeping these out is
-# the difference between "check network access" and "404, not in this registry".
+# Boilerplate pip prints around a failure. Keeping these out is the difference
+# between "check network access" and "no matching distribution for 0.2.0".
 _NOISE = (
-    "a complete log of this run",
-    "npm warn",
     "[notice]",
     "you should consider upgrading",
+    "warning: running pip as the",
+    "defaulting to user installation",
 )
 
 

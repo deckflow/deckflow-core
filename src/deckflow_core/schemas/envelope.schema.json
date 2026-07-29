@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://deckflow.dev/schemas/core/envelope.schema.json",
   "title": "deckflow-core result envelope",
-  "description": "The single result shape every deckflow-core command returns on stdout under --json and in --report.",
+  "description": "The single result shape every deckflow-core command writes to stdout and to --report. JSON is the default output; --human replaces it with prose for people, never for parsers.",
   "type": "object",
   "required": [
     "schema_version",
@@ -11,53 +11,56 @@
     "status",
     "started_at",
     "finished_at",
-    "providers",
+    "extract",
     "inputs",
     "outputs",
     "diagnostics"
   ],
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
+    "schema_version": { "type": "integer", "const": 2 },
     "command": { "type": "string", "minLength": 1 },
     "core_version": { "type": "string", "minLength": 1 },
-    "status": { "enum": ["succeeded", "partial", "cancelled", "failed"] },
+    "status": { "enum": ["succeeded", "partial", "failed"] },
     "started_at": { "type": "string", "format": "date-time" },
     "finished_at": { "type": "string", "format": "date-time" },
-    "providers": { "type": "array", "items": { "$ref": "#/$defs/provider" } },
+    "extract": {
+      "description": "The one brokered provider. Null when the command never resolved it.",
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/extract" }]
+    },
     "inputs": { "type": "array", "items": { "$ref": "#/$defs/fileRecord" } },
     "outputs": { "type": "array", "items": { "type": "object" } },
     "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "env": {
+      "description": "Present on `env check`. See env.schema.json.",
+      "type": "object"
+    },
+    "cloud": {
+      "description": "Present on `auth status`. Same shape as env.cloud.",
+      "type": "object"
+    },
     "provider_result": {
       "description": "The provider's own payload, carried verbatim so normalization is lossless."
     }
   },
   "$defs": {
-    "provider": {
+    "extract": {
       "type": "object",
-      "required": ["name", "package", "pinned_version", "resolution", "status", "acquired", "pinned"],
+      "required": ["status", "version", "pinned_version", "package", "resolution", "acquired", "download_mb"],
       "properties": {
-        "name": { "enum": ["extract", "editor", "deckhtml"] },
-        "package": { "type": "string" },
-        "pinned_version": { "type": "string" },
+        "status": { "enum": ["ready", "not-acquired"] },
         "version": { "type": ["string", "null"] },
-        "resolution": { "enum": ["override", "ambient", "managed-cache", "acquired", "missing"] },
-        "status": { "enum": ["ready", "not-acquired", "blocked"] },
+        "pinned_version": { "type": "string" },
+        "package": { "type": "string" },
+        "resolution": { "enum": ["override", "ambient", "managed", "acquired", "missing"] },
         "acquired": {
           "type": "boolean",
           "description": "True when this run downloaded the provider."
         },
-        "pinned": {
-          "type": "boolean",
-          "description": "False when a --provider-spec or env override replaced the matrix pin; release verification rejects such runs."
+        "download_mb": {
+          "type": "integer",
+          "description": "Approximate download on first use, for warning a user before a long job."
         },
-        "public": {
-          "type": "boolean",
-          "description": "False when the package is reachable only with organisation credentials, so an external integrator cannot acquire it."
-        },
-        "blocked_by": { "type": "string" },
-        "path": { "type": "string" },
-        "unlocks": { "type": "array", "items": { "type": "string" } },
-        "approx_mb": { "type": "integer" }
+        "path": { "type": "string" }
       }
     },
     "fileRecord": {

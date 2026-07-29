@@ -1,22 +1,27 @@
 """Deckflow capability broker.
 
-`deckflow-core` owns the CLI contract; the three providers own the work:
+`deckflow-core` owns the CLI contract; `deckflow-extract` owns the work:
 
-    parse         -> deckflow-extract      (PyPI)
-    editor        -> @deckflow/html-editor (npm)
-    export pptx   -> @deckflow/deckhtml    (npm)
+    parse -> deckflow-extract (PyPI)
 
-Providers are acquired on demand, pinned to an exact version, and installed
-only into core's own managed cache.  A run that only produces HTML never
-downloads a converter, and never needs a Node runtime.
+Extract is acquired on demand, pinned to an exact version, and installed only
+into core's own managed home.  Core is pure Python and never needs a Node
+runtime: `@deckflow/html-editor` and `@deckflow/deckhtml` are called directly
+by the Skill, not brokered here.  `env check` reports whether Node exists
+because the Skill needs the fact, but core reports facts, never verdicts.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-__version__ = "0.1.1"
-SCHEMA_VERSION = 1
+__version__ = "0.3.0"
+
+# 2 renamed the envelope's `providers[]` array to a single `extract{}` object,
+# dropped `pinned`, and added the `env` payload.  There were no 0.2.x users.
+SCHEMA_VERSION = 2
+
+REQUIRES_PYTHON = ">=3.10"
 
 
 def schemas_dir() -> Path:
@@ -29,4 +34,4 @@ def schemas_dir() -> Path:
     return Path(__file__).parent / "schemas"
 
 
-__all__ = ["__version__", "SCHEMA_VERSION", "schemas_dir"]
+__all__ = ["__version__", "SCHEMA_VERSION", "REQUIRES_PYTHON", "schemas_dir"]

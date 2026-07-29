@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Bootstrap and run deckflow-core. Copy this file into a Skill's `scripts/`.
+
+Why a Skill ships this instead of a `pip install deckflow-core` line:
+
+- `python3 -m pip install deckflow-core` fails outright on a PEP 668
+  interpreter — the default on Homebrew macOS and Debian 12+ — with
+  `error: externally-managed-environment`, before the network is touched;
+- macOS `/usr/bin/python3` is 3.9, below core's floor, so falling back to the
+  system interpreter fails differently;
+- even a successful `--user` install puts the `deckflow` console script in a
+  directory that is usually not on PATH, so the very next line fails with
+  `command not found`.
+
+An agent that hits any of those improvises, and the improvisation is usually
+`--break-system-packages` on someone's system Python. So the Skill's
+prerequisite is one line that cannot fail that way:
+
+    python3 scripts/deckflow env check
+
+`pip install --target` is not refused by PEP 668, needs no virtualenv, and
+`python -m deckflow_core` needs nothing on PATH. This file has no third-party
+imports and must keep it that way — it runs before anything is installed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# The core release this Skill was built against. `deckflow update` may install
+# a newer one beside it; the newest managed version wins at startup.
+CORE_PACKAGE = "deckflow-core"
+CORE_VERSION = "0.3.0"
+CORE_MODULE = "deckflow_core"
+INDEX_URL = "https://pypi.org/simple"
+# Optional wheel URL tried after the index, for a core not published yet.
+SOURCE = None
+
+MINIMUM_PYTHON = (3, 10)
+_REEXEC_GUARD = "DECKFLOW_LAUNCHER_REEXEC"
+
+
+def skill_root() -> Path | None:
+    """This file lives at <skill>/scripts/deckflow."""
+    root = Path(__file__).resolve().parent.parent
+    return root if (root / "SKILL.md").is_file() else None
+
+
+def deckflow_home() -> Path:
+    override = os.environ.get("DECKFLOW_HOME")
+    return Path(override).expanduser() if override else Path.home() / ".deckflow"
+
+
+def version_key(text: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for chunk in text.replace("-", ".").split("."):
+        if chunk.isdigit():
+            parts.append(int(chunk))
+        else:
+            break
+    return tuple(parts) or (-1,)
+
+
+def ensure_interpreter() -> None:
+    """Re-exec under a new enough python3, once.
+
+    The guard matters more than it looks: without it a machine whose every
+    candidate interpreter is too old would re-exec forever.
+    """
+    if sys.version_info[:2] >= MINIMUM_PYTHON:
+        return
+    if os.environ.get(_REEXEC_GUARD):
+        fail(
+            "PYTHON_TOO_OLD",
+            f"No Python {'.'.join(map(str, MINIMUM_PYTHON))}+ interpreter was found.",
+            f"Running {sys.executable} ({sys.version.split()[0]}). Install a newer python3 "
+            "(`brew install python@3.12`) and re-run.",
+        )
+    for name in ("python3.14", "python3.13", "python3.12", "python3.11", "python3.10", "python3"):
+        candidate = shutil.which(name)
+        if candidate and _version_of(candidate) >= MINIMUM_PYTHON:
+            os.environ[_REEXEC_GUARD] = "1"
+            os.execv(candidate, [candidate, os.path.abspath(__file__), *sys.argv[1:]])
+    os.environ[_REEXEC_GUARD] = "1"
+    fail(
+        "PYTHON_TOO_OLD",
+        f"This Python is {sys.version.split()[0]}; core needs "
+        f"{'.'.join(map(str, MINIMUM_PYTHON))} or newer.",
+        "Install a newer python3 and re-run.",
+    )
+
+
+def _version_of(executable: str) -> tuple[int, ...]:
+    try:
+        completed = subprocess.run(
+            [executable, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return (0,)
+    return version_key(completed.stdout.strip())
+
+
+def locate_core(root: Path | None) -> Path | None:
+    """Vendored first, then the newest managed install, then already-importable.
+
+    Vendored wins because a Skill that ships its own copy has pinned it on
+    purpose and must not silently run a different version someone else
+    installed.
+    """
+    if root is not None and (root / "vendor" / CORE_MODULE / "__init__.py").is_file():
+        return root / "vendor"
+
+    managed = deckflow_home() / "core"
+    if managed.is_dir():
+        candidates = [entry for entry in managed.iterdir() if (entry / CORE_MODULE).is_dir()]
+        if candidates:
+            return max(candidates, key=lambda entry: version_key(entry.name))
+
+    try:
+        __import__(CORE_MODULE)
+    except ImportError:
+        return None
+    return Path()  # already importable; nothing to add to sys.path
+
+
+def install_core() -> Path:
+    target = deckflow_home() / "core" / CORE_VERSION
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+
+    base = [
+        sys.executable, "-m", "pip", "install",
+        "--target", str(target), "--no-input", "--disable-pip-version-check",
+    ]
+    attempts = [[*base, "--index-url", INDEX_URL, f"{CORE_PACKAGE}=={CORE_VERSION}"]]
+    if SOURCE:
+        attempts.append([*base, SOURCE])
+
+    errors: list[str] = []
+    for command in attempts:
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=600)
+        except (OSError, subprocess.SubprocessError) as error:
+            errors.append(str(error))
+            continue
+        if completed.returncode == 0 and (target / CORE_MODULE).is_dir():
+            return target
+        errors.append((completed.stderr or completed.stdout or "").strip().splitlines()[-1:][0]
+                      if (completed.stderr or completed.stdout).strip() else "pip failed")
+
+    shutil.rmtree(target, ignore_errors=True)
+    fail(
+        "CORE_INSTALL_FAILED",
+        f"Could not install {CORE_PACKAGE}=={CORE_VERSION}.",
+        f"Check network access to {INDEX_URL}. Details: {' | '.join(errors)}",
+    )
+    raise SystemExit(5)  # unreachable; fail() exits
+
+
+def fail(rule_id: str, message: str, recovery: str) -> None:
+    """Emit a well-formed failure envelope, never a traceback.
+
+    Callers are told they can `json.loads(stdout)` unconditionally, and that
+    promise has to hold for a bootstrap that never reached core.
+    """
+    envelope = {
+        "schema_version": 2,
+        "command": " ".join(sys.argv[1:]) or "deckflow",
+        "core_version": None,
+        "status": "failed",
+        "extract": None,
+        "inputs": [],
+        "outputs": [],
+        "diagnostics": [
+            {
+                "rule_id": rule_id,
+                "severity": "error",
+                "message": message,
+                "recovery": recovery,
+            }
+        ],
+    }
+    sys.stdout.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+    sys.stderr.write(f"[deckflow] {message}\n[deckflow] {recovery}\n")
+    raise SystemExit(5)
+
+
+def main() -> int:
+    ensure_interpreter()
+
+    root = skill_root()
+    if root is not None:
+        # So core can report which skill is calling without going looking for
+        # one; a cwd-based search would find the user's project, not the skill.
+        os.environ.setdefault("DECKFLOW_SKILL_ROOT", str(root))
+
+    location = locate_core(root)
+    if location is None:
+        location = install_core()
+    if str(location):
+        sys.path.insert(0, str(location))
+
+    from deckflow_core.cli import main as core_main
+
+    return core_main(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

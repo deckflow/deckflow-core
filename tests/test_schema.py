@@ -16,8 +16,8 @@ from pathlib import Path
 from deckflow_core import schemas_dir
 from deckflow_core.diagnostics import Diagnostic
 from deckflow_core.envelope import Envelope
-from deckflow_core.providers import matrix
-from deckflow_core.providers.resolve import Resolution
+from deckflow_core.extract import pin
+from deckflow_core.extract.resolve import Extract
 
 _TYPES = {
     "object": dict, "array": list, "string": str,
@@ -80,7 +80,7 @@ def load(name: str) -> dict:
 class SchemasAreReachableTest(unittest.TestCase):
     def test_both_schemas_ship(self):
         self.assertTrue((schemas_dir() / "envelope.schema.json").is_file())
-        self.assertTrue((schemas_dir() / "providers.schema.json").is_file())
+        self.assertTrue((schemas_dir() / "env.schema.json").is_file())
 
     def test_schemas_live_inside_the_package_so_a_vendored_copy_carries_them(self):
         """Copying `deckflow_core/` alone must be enough.
@@ -105,60 +105,81 @@ class EnvelopeConformsTest(unittest.TestCase):
         self.assertEqual(errors, [], "\n".join(errors))
 
     def test_minimal_envelope(self):
-        self._check(Envelope(command="providers"))
+        self._check(Envelope(command="env check"))
 
     def test_envelope_with_every_optional_part(self):
-        envelope = Envelope(command="providers.install")
+        envelope = Envelope(command="parse")
         envelope.status = "partial"
-        envelope.providers = [
-            Resolution(spec=matrix.get("deckhtml"), resolution="acquired",
-                       status="ready", version="0.3.2", acquired=True,
-                       path="/tmp/x/node_modules/.bin/deckhtml").to_json()
-        ]
+        envelope.extract = Extract(
+            resolution="acquired", status="ready", version=pin.VERSION,
+            acquired=True, path="/tmp/x/extract/" + pin.VERSION,
+        ).to_json()
         envelope.inputs = [{"path": "/abs/in.pdf", "sha256": "a" * 64, "bytes": 12}]
-        envelope.outputs = [{"path": "/abs/out.pptx"}]
-        envelope.provider_result = {"ok": True, "mode": "local"}
+        envelope.outputs = [{"path": "/abs/out", "kind": "parse-bundle"}]
+        envelope.provider_result = {"status": "parsed", "tier": 0}
         envelope.add(
-            Diagnostic(rule_id="PROVIDER_ACQUIRED", severity="info", message="m",
+            Diagnostic(rule_id="EXTRACT_ACQUIRED", severity="info", message="m",
                        location="/tmp/x", expected="e", actual="a", recovery="r")
         )
         self._check(envelope)
 
-    def test_blocked_provider_conforms(self):
-        envelope = Envelope(command="providers")
-        envelope.providers = [
-            Resolution(spec=matrix.get("editor"), resolution="missing",
-                       status="blocked", blocked_by="node-runtime-missing").to_json()
-        ]
+    def test_an_unacquired_provider_conforms(self):
+        envelope = Envelope(command="env check")
+        envelope.extract = Extract(resolution="missing", status="not-acquired").to_json()
         self._check(envelope)
 
+    def test_extract_is_present_and_null_when_never_resolved(self):
+        """Always-present beats sometimes-present: one less caller branch."""
+        payload = Envelope(command="update").to_json()
+        self.assertIn("extract", payload)
+        self.assertIsNone(payload["extract"])
+        self._check(Envelope(command="update"))
+
     def test_schema_rejects_a_status_the_code_cannot_emit(self):
-        payload = Envelope(command="providers").to_json()
+        payload = Envelope(command="env check").to_json()
         payload["status"] = "mostly-fine"
         self.assertTrue(validate(payload, self.schema, self.schema))
 
     def test_schema_rejects_a_lowercase_rule_id(self):
-        payload = Envelope(command="providers").to_json()
+        payload = Envelope(command="env check").to_json()
         payload["diagnostics"] = [{"rule_id": "lower_case", "severity": "info", "message": "m"}]
         self.assertTrue(validate(payload, self.schema, self.schema))
 
 
-class PinMatrixConformsTest(unittest.TestCase):
-    def test_shipped_matrix_matches_its_schema(self):
-        schema = load("providers.schema.json")
-        raw = json.loads(
-            (Path(matrix.__file__).with_name("providers.json")).read_text(encoding="utf-8")
+class EnvPayloadConformsTest(unittest.TestCase):
+    """`env check` emits a second documented shape; it must match its schema."""
+
+    def setUp(self):
+        self.schema = load("env.schema.json")
+
+    def test_a_live_env_check_conforms(self):
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        env = {**os.environ, "PYTHONPATH": src, "DECKFLOW_HOME": tempfile.mkdtemp()}
+        env.pop("DECKFLOW_SKILL_ROOT", None)
+        env.pop("DECKFLOW_EXTRACT_BIN", None)
+        completed = subprocess.run(
+            [sys.executable, "-m", "deckflow_core", "env", "check"],
+            capture_output=True, text=True, env=env, timeout=120,
         )
-        errors = validate(raw, schema, schema)
+        payload = json.loads(completed.stdout)["env"]
+        errors = validate(payload, self.schema, self.schema)
         self.assertEqual(errors, [], "\n".join(errors))
 
-    def test_matrix_core_version_tracks_the_package(self):
-        from deckflow_core import __version__
+    def test_the_schema_requires_configured_to_be_nullable(self):
+        """Encoded in the schema because it is a contract, not an accident."""
+        cloud = self.schema["$defs"]["cloud"]["properties"]["configured"]
+        self.assertIn("null", cloud["type"])
 
-        raw = json.loads(
-            (Path(matrix.__file__).with_name("providers.json")).read_text(encoding="utf-8")
-        )
-        self.assertEqual(raw["core_version"], __version__)
+
+class PinTracksThePackageTest(unittest.TestCase):
+    def test_the_extract_pin_is_exact(self):
+        self.assertEqual(pin.REQUIREMENT, f"{pin.PACKAGE}=={pin.VERSION}")
+        self.assertNotIn(pin.VERSION, ("latest", "*", ""))
 
 
 if __name__ == "__main__":

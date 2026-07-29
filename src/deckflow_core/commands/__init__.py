@@ -1,7 +1,7 @@
 """Command implementations.
 
-v0.1 registers exactly one command here.  `parse`, `editor` and `export pptx`
-arrive with M1/M2; until their implementations land they are not registered at
-all — a deferred command name may not ship as a stub, a placeholder, or a
-"not implemented" response.
+Core registers four: `env`, `auth`, `parse` and `update`.  Deck editing and
+PPTX export are not brokered here — the Skill calls `@deckflow/html-editor` and
+`@deckflow/deckhtml` directly, so their contracts stay with the tools that own
+them instead of being restated in a second place.
 """

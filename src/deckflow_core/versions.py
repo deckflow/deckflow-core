@@ -74,6 +74,19 @@ def satisfies(version: str | None, spec: str | None) -> bool:
     return True
 
 
+def is_newer(candidate: str | None, current: str | None) -> bool:
+    """True when `candidate` is strictly newer than `current`.
+
+    Either side being unparseable returns False: `deckflow update` must not
+    install something because a version string it could not read *might* be
+    newer.
+    """
+    left, right = parse(candidate), parse(current)
+    if left is None or right is None:
+        return False
+    return _compare(left, right) > 0
+
+
 def normalize(version: str | None) -> str | None:
     """Render a parsed version back as a plain dotted string, or None."""
     parsed = parse(version)

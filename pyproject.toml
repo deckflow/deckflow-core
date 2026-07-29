@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deckflow-core"
-version = "0.1.1"
-description = "Deckflow capability broker: one CLI over deckflow-extract, html-editor and deckhtml, with on-demand provider acquisition."
+version = "0.3.0"
+description = "Deckflow capability broker: one CLI and one result envelope over deckflow-extract, with on-demand provider acquisition."
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-keywords = ["deckflow", "presentation", "pptx", "html", "cli", "extraction"]
+keywords = ["deckflow", "presentation", "html", "cli", "extraction", "parsing"]
 authors = [{ name = "DeckFlow Contributors" }]
 
 # Zero third-party dependencies is a hard constraint, not a preference: it is
@@ -28,6 +28,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Build Tools",
   "Topic :: Text Processing :: Markup :: HTML",
 ]
@@ -45,4 +46,4 @@ deckflow = "deckflow_core.cli:main"
 packages = ["src/deckflow_core"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src", "tests", "launcher", "README.md", "LICENSE", "pyproject.toml"]

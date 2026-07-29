@@ -1,10 +1,13 @@
 """The one result shape every command returns.
 
-Three providers speak three dialects — `deckflow-extract` has a
-parsed/repairable/needs-input/blocked state machine, `deckhtml` returns
-`{ok: true, ...}`, `html-editor` prints prose.  The Skill should not have to
-parse three of those, so core normalizes to this envelope and carries the
-provider's own payload verbatim under `provider_result`: unified, but lossless.
+`deckflow-extract` has its own parsed/repairable/needs-input/blocked state
+machine.  Core normalizes it to this envelope and carries the provider's own
+payload verbatim under `provider_result`: unified, but lossless.
+
+`extract` is a single object, not the `providers[]` array of schema 1.  Core
+brokers one tool; an array of one made every caller index into a list to find
+the only element it could ever contain.  If a second brokered tool ever
+appears, it gets a sibling key — not a resurrected plural abstraction.
 """
 
 from __future__ import annotations
@@ -19,10 +22,12 @@ from .diagnostics import Diagnostic, sort_diagnostics
 
 STATUS_SUCCEEDED = "succeeded"
 STATUS_PARTIAL = "partial"
-STATUS_CANCELLED = "cancelled"
 STATUS_FAILED = "failed"
 
-STATUSES = (STATUS_SUCCEEDED, STATUS_PARTIAL, STATUS_CANCELLED, STATUS_FAILED)
+# No `cancelled`: only a long-running session could produce it, and core no
+# longer runs one. A status the code cannot emit is a status a caller writes
+# dead branches for.
+STATUSES = (STATUS_SUCCEEDED, STATUS_PARTIAL, STATUS_FAILED)
 
 
 def utc_now() -> str:
@@ -35,7 +40,7 @@ class Envelope:
     status: str = STATUS_SUCCEEDED
     started_at: str = field(default_factory=utc_now)
     finished_at: str | None = None
-    providers: list[dict[str, Any]] = field(default_factory=list)
+    extract: dict[str, Any] | None = None
     inputs: list[dict[str, Any]] = field(default_factory=list)
     outputs: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
@@ -58,7 +63,9 @@ class Envelope:
             "status": self.status,
             "started_at": self.started_at,
             "finished_at": self.finished_at or utc_now(),
-            "providers": self.providers,
+            # Always present, null when this command never resolved the
+            # provider — one less conditional in every caller.
+            "extract": self.extract,
             "inputs": self.inputs,
             "outputs": self.outputs,
             "diagnostics": [d.to_json() for d in sort_diagnostics(self.diagnostics)],

@@ -21,8 +21,7 @@ from pathlib import Path
 from deckflow_core.commands import parse as parse_cmd
 from deckflow_core.envelope import EXTRACT_STATUS_MAP
 from deckflow_core.exits import CoreError
-from deckflow_core.providers import matrix
-from deckflow_core.providers.resolve import Resolution
+from deckflow_core.extract.resolve import STATUS_READY, Extract
 
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -40,14 +39,17 @@ def options(**overrides) -> argparse.Namespace:
     base = dict(
         input="x", out="y", overwrite=False, mode="local", upgrade="never",
         type=None, ocr=None, max_pages=None, max_table_rows=None,
-        provider_timeout=None, timeout=900, json=True,
+        provider_timeout=None, timeout=900, human=False,
+        extract_bin=None, offline=False, skill_root=None, report=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
 
 
-def fake_resolution() -> Resolution:
-    return Resolution(spec=matrix.get("extract"), command=["/fake/deckflow-extract"])
+def fake_resolution() -> Extract:
+    return Extract(
+        status=STATUS_READY, version="0.3.0", command=["/fake/deckflow-extract"],
+    )
 
 
 class InputPolicyTest(unittest.TestCase):
@@ -140,16 +142,43 @@ class CommandConstructionTest(unittest.TestCase):
 class CredentialWithholdingTest(unittest.TestCase):
     def test_cloud_keys_are_removed_for_a_local_run(self):
         with unittest.mock.patch.dict(
-            os.environ, {"DECKFLOW_API_KEY": "secret", "DECKFLOW_SPACE_ID": "s", "PATH": "/usr/bin"}
+            os.environ,
+            {
+                "DECKFLOW_API_KEY": "secret", "DECKOPS_API_KEY": "secret",
+                "DECKFLOW_TOKEN": "t", "DECKFLOW_SPACE_ID": "s", "PATH": "/usr/bin",
+            },
         ):
             env = parse_cmd._environ(cloud=False)
-            self.assertNotIn("DECKFLOW_API_KEY", env)
-            self.assertNotIn("DECKFLOW_SPACE_ID", env)
+            for name in (
+                "DECKFLOW_API_KEY", "DECKOPS_API_KEY", "DECKFLOW_TOKEN", "DECKFLOW_SPACE_ID"
+            ):
+                self.assertNotIn(name, env)
             self.assertIn("PATH", env)
 
+    def test_the_providers_stored_credentials_are_refused_too(self):
+        """Removing variables stopped being enough at deckflow-extract 0.3.
+
+        The provider now also reads ~/.deckflow/credentials, shared with
+        DeckHTML. Without this switch a logged-in machine would hand the
+        provider back exactly what core just withheld.
+        """
+        env = parse_cmd._environ(cloud=False)
+        self.assertEqual(env["DECKFLOW_NO_STORED_CREDENTIALS"], "1")
+
     def test_cloud_keys_are_kept_when_cloud_was_requested(self):
-        with unittest.mock.patch.dict(os.environ, {"DECKFLOW_API_KEY": "secret"}):
-            self.assertIn("DECKFLOW_API_KEY", parse_cmd._environ(cloud=True))
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "DECKFLOW_API_KEY": "secret",
+                "DECKFLOW_HOME": "/tmp/deckflow-home",
+                "DECKFLOW_CONFIG_DIR": "",
+                "DECKHTML_CONFIG_DIR": "",
+            },
+        ):
+            env = parse_cmd._environ(cloud=True)
+            self.assertIn("DECKFLOW_API_KEY", env)
+            self.assertNotIn("DECKFLOW_NO_STORED_CREDENTIALS", env)
+            self.assertEqual(env["DECKFLOW_CONFIG_DIR"], "/tmp/deckflow-home")
 
 
 class StatusMappingTest(unittest.TestCase):
@@ -193,7 +222,7 @@ class CliTest(unittest.TestCase):
             out.mkdir()
             (out / "stale.json").write_text("{}", encoding="utf-8")
             code, stdout, _ = run_parse(
-                str(source), "--out", str(out), "--json", "--provider-install", "never"
+                str(source), "--out", str(out), "--offline"
             )
             self.assertEqual(code, 6)
             self.assertEqual(
@@ -209,8 +238,8 @@ class CliTest(unittest.TestCase):
             unrelated = out / "important.txt"
             unrelated.write_text("keep", encoding="utf-8")
             code, stdout, _ = run_parse(
-                str(source), "--out", str(out), "--overwrite", "--json",
-                "--provider-install", "never",
+                str(source), "--out", str(out), "--overwrite",
+                "--offline",
             )
             self.assertEqual(code, 6)
             self.assertEqual(
@@ -248,8 +277,8 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
             code, stdout, _ = run_parse(
-                str(source), "--out", str(out), "--overwrite", "--json",
-                "--provider-install", "never",
+                str(source), "--out", str(out), "--overwrite",
+                "--offline",
             )
             self.assertEqual(code, 6)
             self.assertEqual(
@@ -264,7 +293,7 @@ class CliTest(unittest.TestCase):
             source.write_text("# preserve me", encoding="utf-8")
             code, stdout, _ = run_parse(
                 str(source), "--out", str(Path(root) / "out"),
-                "--report", str(source), "--json", "--provider-install", "never",
+                "--report", str(source), "--offline",
             )
             self.assertEqual(code, 6)
             self.assertEqual(
@@ -274,13 +303,13 @@ class CliTest(unittest.TestCase):
 
     def test_input_is_checked_before_the_provider_is_touched(self):
         code, stdout, _ = run_parse(
-            "https://example.com", "--out", "/tmp/never-created", "--json",
-            "--provider-install", "never",
+            "https://example.com", "--out", "/tmp/never-created",
+            "--offline",
         )
         payload = json.loads(stdout)
         self.assertEqual(code, 3)
         self.assertEqual(payload["diagnostics"][0]["rule_id"], "PARSE_INPUT_NOT_LOCAL")
-        self.assertEqual(payload["providers"], [])
+        self.assertIsNone(payload["extract"])
         self.assertFalse(Path("/tmp/never-created").exists())
 
     def test_help_states_the_boundaries(self):
@@ -308,7 +337,7 @@ class LiveParseTest(unittest.TestCase):
             source = Path(root) / "notes.md"
             source.write_text(self._MARKDOWN, encoding="utf-8")
             out = Path(root) / "bundle"
-            code, stdout, stderr = run_parse(str(source), "--out", str(out), "--json")
+            code, stdout, stderr = run_parse(str(source), "--out", str(out))
             self.assertEqual(code, 0, stderr)
 
             payload = json.loads(stdout)
@@ -326,7 +355,7 @@ class LiveParseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "notes.md"
             source.write_text(self._MARKDOWN, encoding="utf-8")
-            _, stdout, _ = run_parse(str(source), "--out", str(Path(root) / "b"), "--json")
+            _, stdout, _ = run_parse(str(source), "--out", str(Path(root) / "b"))
             native = json.loads(stdout)["provider_result"]
             for key in ("status", "tier", "fidelity", "decision", "recommendations", "gaps"):
                 self.assertIn(key, native, f"{key} was dropped on the way through core")

@@ -21,6 +21,8 @@ _SRC = str(Path(__file__).resolve().parents[1] / "src")
 def run_cli(*args: str, home: str | None = None) -> tuple[int, str, str]:
     """Run the CLI in a subprocess so exit code and stream separation are real."""
     env = {**os.environ, "PYTHONPATH": _SRC, "DECKFLOW_HOME": home or tempfile.mkdtemp()}
+    env.pop("DECKFLOW_SKILL_ROOT", None)
+    env.pop("DECKFLOW_EXTRACT_BIN", None)
     completed = subprocess.run(
         [sys.executable, "-m", "deckflow_core", *args],
         capture_output=True, text=True, env=env, timeout=120,
@@ -28,67 +30,71 @@ def run_cli(*args: str, home: str | None = None) -> tuple[int, str, str]:
     return completed.returncode, completed.stdout, completed.stderr
 
 
-class DeferredCommandsTest(unittest.TestCase):
-    """A deferred command must be absent, not stubbed.
+class UnbrokeredCommandsTest(unittest.TestCase):
+    """A capability core does not broker must be absent, not stubbed.
 
-    Shipping `parse` as a "not implemented" response would put the name in
-    --help and let a caller believe the capability exists.
+    Shipping `editor` or `export pptx` as a thin forwarder would put the name
+    in --help and let a caller believe core owns the contract. The Skill calls
+    html-editor and deckhtml directly instead. `providers` is on this list for
+    a different reason: it was core's own word for one package, and the
+    capability now lives under `env`.
     """
 
-    def test_deferred_commands_are_not_registered(self):
-        # `validate html` is deferred beyond 0.1.x. It must not appear as a
-        # stub or a "not implemented" response: either would put the name in
-        # --help and let a caller believe the capability exists.
-        code, stdout, stderr = run_cli("validate")
-        self.assertEqual(code, 2)
-        self.assertIn("invalid choice", stderr)
-        self.assertEqual(stdout, "")
+    def test_unbrokered_commands_are_not_registered(self):
+        for name in ("editor", "export", "validate", "providers"):
+            with self.subTest(command=name):
+                code, stdout, stderr = run_cli(name)
+                self.assertEqual(code, 2)
+                self.assertIn("invalid choice", stderr)
+                self.assertEqual(stdout, "")
 
-    def test_help_does_not_advertise_deferred_commands(self):
+    def test_help_does_not_advertise_unbrokered_commands(self):
         _, stdout, _ = run_cli("--help")
-        self.assertNotIn("    validate", stdout)
+        for name in ("editor", "export", "validate", "providers"):
+            self.assertNotIn(f"    {name}", stdout)
 
     def test_help_lists_every_implemented_command(self):
         _, stdout, _ = run_cli("--help")
-        for name in ("providers", "parse", "editor", "export"):
+        for name in ("env", "auth", "parse", "update"):
             self.assertIn(f"    {name}", stdout)
-
-    def test_export_advertises_only_the_format_it_implements(self):
-        code, stdout, _ = run_cli("export", "--help")
-        self.assertEqual(code, 0)
-        self.assertIn("pptx", stdout)
-        for absent in ("pdf", "png", "html"):
-            self.assertNotIn(f"    {absent}", stdout)
-
-    def test_export_without_a_format_shows_help_rather_than_failing_oddly(self):
-        code, stdout, _ = run_cli("export")
-        self.assertEqual(code, 0)
-        self.assertIn("pptx", stdout)
 
 
 class StdoutDisciplineTest(unittest.TestCase):
-    def test_json_mode_emits_exactly_one_object(self):
-        code, stdout, _ = run_cli("providers", "--json")
+    """JSON is the default, because every caller of this CLI is a program."""
+
+    def test_json_is_the_default_and_is_exactly_one_object(self):
+        code, stdout, _ = run_cli("env", "check")
         self.assertEqual(code, 0)
         self.assertEqual(len(stdout.strip().splitlines()), 1)
         payload = json.loads(stdout)
-        self.assertEqual(payload["command"], "providers")
+        self.assertEqual(payload["command"], "env check")
         self.assertEqual(payload["core_version"], __version__)
 
     def test_human_mode_keeps_json_off_stdout(self):
-        code, stdout, _ = run_cli("providers")
+        code, stdout, _ = run_cli("env", "check", "--human")
         self.assertEqual(code, 0)
-        self.assertIn("provider", stdout)
+        self.assertIn("python", stdout)
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(stdout)
+
+    def test_a_common_flag_works_before_the_subcommand_too(self):
+        """`deckflow env --human check` must not be silently reset to JSON.
+
+        A subparser that re-declares a parent's flag overwrites the parsed
+        value with its own default unless the default is suppressed.
+        """
+        code, stdout, _ = run_cli("env", "--human", "check")
+        self.assertEqual(code, 0)
         with self.assertRaises(json.JSONDecodeError):
             json.loads(stdout)
 
     def test_failures_still_produce_a_parseable_envelope(self):
-        code, stdout, stderr = run_cli("providers", "install", "nope", "--json")
-        self.assertEqual(code, 2)
+        code, stdout, stderr = run_cli("env", "setup", "--offline")
+        self.assertEqual(code, 5)
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "failed")
-        self.assertEqual(payload["diagnostics"][0]["rule_id"], "PROVIDER_UNKNOWN")
-        self.assertIn("nope", stderr)
+        self.assertEqual(payload["diagnostics"][0]["rule_id"], "EXTRACT_MISSING")
+        self.assertIn("offline", stderr)
 
     def test_version_flag(self):
         code, stdout, _ = run_cli("--version")
@@ -99,8 +105,8 @@ class StdoutDisciplineTest(unittest.TestCase):
 class ReportTest(unittest.TestCase):
     def test_report_is_semantically_identical_to_stdout(self):
         with tempfile.TemporaryDirectory() as root:
-            report = Path(root) / "providers.json"
-            code, stdout, _ = run_cli("providers", "--json", "--report", str(report))
+            report = Path(root) / "env.json"
+            code, stdout, _ = run_cli("env", "check", "--report", str(report))
             self.assertEqual(code, 0)
             written = json.loads(report.read_text(encoding="utf-8"))
             emitted = json.loads(stdout)
@@ -111,59 +117,81 @@ class ReportTest(unittest.TestCase):
 
     def test_report_is_written_even_in_human_mode(self):
         with tempfile.TemporaryDirectory() as root:
-            report = Path(root) / "providers.json"
-            run_cli("providers", "--report", str(report))
-            self.assertEqual(json.loads(report.read_text())["command"], "providers")
+            report = Path(root) / "env.json"
+            run_cli("env", "check", "--human", "--report", str(report))
+            self.assertEqual(json.loads(report.read_text())["command"], "env check")
 
     def test_existing_report_is_not_silently_overwritten(self):
         with tempfile.TemporaryDirectory() as root:
-            report = Path(root) / "providers.json"
+            report = Path(root) / "env.json"
             report.write_text("keep me", encoding="utf-8")
-            code, stdout, _ = run_cli("providers", "--json", "--report", str(report))
+            code, stdout, _ = run_cli("env", "check", "--report", str(report))
             self.assertEqual(code, 6)
             self.assertEqual(json.loads(stdout)["diagnostics"][0]["rule_id"], "REPORT_EXISTS")
             self.assertEqual(report.read_text(encoding="utf-8"), "keep me")
 
     def test_report_target_cannot_be_a_directory(self):
         with tempfile.TemporaryDirectory() as root:
-            code, stdout, _ = run_cli("providers", "--report", root, "--json")
+            code, stdout, _ = run_cli("env", "check", "--report", root)
             self.assertEqual(code, 6)
             self.assertEqual(
                 json.loads(stdout)["diagnostics"][0]["rule_id"], "REPORT_NOT_A_FILE"
             )
 
 
-class ProvidersListingTest(unittest.TestCase):
-    def test_listing_has_no_side_effects(self):
+class EnvCommandTest(unittest.TestCase):
+    def test_check_has_no_side_effects(self):
+        """Documented as safe to run on every invocation, so it must be."""
         with tempfile.TemporaryDirectory() as home:
-            run_cli("providers", "--json", home=home)
-            self.assertFalse((Path(home) / "providers").exists())
+            run_cli("env", "check", home=home)
+            self.assertEqual(list(Path(home).iterdir()), [])
 
-    def test_listing_reports_every_matrix_provider(self):
-        _, stdout, _ = run_cli("providers", "--json")
-        names = {entry["name"] for entry in json.loads(stdout)["providers"]}
-        self.assertEqual(names, {"extract", "editor", "deckhtml"})
-
-    def test_listing_discloses_download_size_and_what_each_unlocks(self):
-        _, stdout, _ = run_cli("providers", "--json")
-        for entry in json.loads(stdout)["providers"]:
-            self.assertIn("approx_mb", entry)
-            self.assertTrue(entry["unlocks"])
-            self.assertIn(entry["status"], ("ready", "not-acquired", "blocked"))
-
-    def test_remove_on_an_empty_cache_is_not_an_error(self):
-        code, stdout, _ = run_cli("providers", "remove", "deckhtml", "--json")
+    def test_bare_env_is_the_check(self):
+        code, stdout, _ = run_cli("env")
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(stdout)["diagnostics"][0]["rule_id"], "PROVIDER_NOT_IN_CACHE")
+        self.assertEqual(json.loads(stdout)["command"], "env check")
 
-    def test_bad_provider_bin_syntax_is_a_usage_error(self):
-        code, _, stderr = run_cli("providers", "--provider-bin", "no-equals-sign", "--json")
-        self.assertEqual(code, 2)
+    def test_check_exits_zero_even_with_nothing_installed(self):
+        """It is a report, not an assertion.
 
-    def test_bad_policy_is_rejected_by_argparse(self):
-        code, _, stderr = run_cli("providers", "--provider-install", "sometimes")
-        self.assertEqual(code, 2)
-        self.assertIn("invalid choice", stderr)
+        A non-zero exit on the first line of a Skill's prerequisites tells an
+        agent the Skill is broken, and it will then try to repair a machine
+        that is fine.
+        """
+        with tempfile.TemporaryDirectory() as home:
+            code, stdout, _ = run_cli("env", "check", home=home)
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout)
+            self.assertEqual(payload["status"], "succeeded")
+            self.assertEqual(payload["extract"]["status"], "not-acquired")
+
+    def test_check_discloses_the_download_before_a_long_job(self):
+        code, stdout, _ = run_cli("env", "check")
+        extract = json.loads(stdout)["extract"]
+        self.assertIn("download_mb", extract)
+        self.assertIn(extract["status"], ("ready", "not-acquired"))
+
+    def test_clean_on_an_empty_home_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as home:
+            code, stdout, _ = run_cli("env", "clean", home=home)
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                json.loads(stdout)["diagnostics"][0]["rule_id"], "EXTRACT_NOT_IN_CACHE"
+            )
+
+    def test_clean_removes_only_the_managed_extract(self):
+        with tempfile.TemporaryDirectory() as home:
+            managed = Path(home) / "extract" / "0.3.0"
+            managed.mkdir(parents=True)
+            (Path(home) / "credentials").write_text("{}", encoding="utf-8")
+            (Path(home) / "parse").mkdir()
+            code, _, _ = run_cli("env", "clean", home=home)
+            self.assertEqual(code, 0)
+            self.assertFalse((Path(home) / "extract").exists())
+            # The provider's own engine sidecars and the shared credential file
+            # are inside our home but are not ours to delete.
+            self.assertTrue((Path(home) / "credentials").is_file())
+            self.assertTrue((Path(home) / "parse").is_dir())
 
 
 class InProcessTest(unittest.TestCase):
@@ -184,7 +212,7 @@ class InProcessTest(unittest.TestCase):
         self.assertIn("network policy", text)
         self.assertIn("are never uploaded", text)
         self.assertIn("exit codes", text)
-        self.assertIn("$DECKFLOW_HOME/providers", text)
+        self.assertIn("$DECKFLOW_HOME", text)
         self.assertIn("Nothing is installed globally", text)
 
 
