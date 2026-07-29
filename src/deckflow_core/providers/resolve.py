@@ -51,6 +51,7 @@ class Resolution:
     env: dict[str, str] = field(default_factory=dict)
     path: str | None = None
     acquired: bool = False
+    pinned: bool | None = None
     blocked_by: str | None = None
     diagnostics: list[Diagnostic] = field(default_factory=list)
 
@@ -67,7 +68,7 @@ class Resolution:
             "resolution": self.resolution,
             "status": self.status,
             "acquired": self.acquired,
-            "pinned": self.spec.pinned,
+            "pinned": self.spec.pinned if self.pinned is None else self.pinned,
             "public": self.spec.public,
             "unlocks": list(self.spec.unlocks),
             "approx_mb": self.spec.approx_mb,
@@ -119,7 +120,7 @@ def _managed(spec: ProviderSpec, home: Path) -> Resolution | None:
         prefix = acquire_npm.install_dir(home, spec)
         found = acquire_npm.installed_version(prefix, spec)
         binary = acquire_npm.bin_path(prefix, spec)
-        if found and binary.exists():
+        if found == spec.version and binary.exists():
             return Resolution(
                 spec=spec, resolution=RESOLUTION_MANAGED, status=STATUS_READY,
                 version=found, command=[str(binary)], path=str(binary),
@@ -127,7 +128,7 @@ def _managed(spec: ProviderSpec, home: Path) -> Resolution | None:
         return None
     target = acquire_pypi.install_dir(home, spec)
     found = acquire_pypi.installed_version(target, spec)
-    if found:
+    if found == spec.version:
         command, env = acquire_pypi.invocation(target, spec)
         return Resolution(
             spec=spec, resolution=RESOLUTION_MANAGED, status=STATUS_READY,
@@ -243,10 +244,29 @@ def resolve(
                 ),
                 exit_code=EXIT_EXECUTION,
             )
+        found = _probe_version([str(path)])
+        pinned = spec.pinned and found == spec.version
+        if found != spec.version:
+            carried.append(
+                Diagnostic(
+                    rule_id="PROVIDER_OVERRIDE_VERSION_MISMATCH",
+                    severity="warning",
+                    message=(
+                        f"The explicit {spec.name} override does not report the exact requested version."
+                    ),
+                    location=str(path),
+                    expected=spec.version,
+                    actual=str(found),
+                    recovery=(
+                        "Use a binary matching the requested version for release verification, "
+                        "or keep this override only for development."
+                    ),
+                )
+            )
         return Resolution(
             spec=spec, resolution=RESOLUTION_OVERRIDE, status=STATUS_READY,
-            version=_probe_version([str(path)]), command=[str(path)], path=str(path),
-            diagnostics=carried,
+            version=found, command=[str(path)], path=str(path),
+            pinned=pinned, diagnostics=carried,
         )
 
     ambient = _ambient(spec)

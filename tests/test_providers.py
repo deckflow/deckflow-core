@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from deckflow_core.exits import CoreError
-from deckflow_core.providers import acquire_npm, matrix
+from deckflow_core.providers import acquire_npm, acquire_pypi, matrix
 from deckflow_core.providers import resolve as resolver
 
 
@@ -235,6 +235,22 @@ class ResolutionLadderTest(unittest.TestCase):
         )
         self.assertEqual(result.resolution, "override")
         self.assertTrue(result.ready)
+        self.assertFalse(result.to_json()["pinned"])
+        self.assertTrue(
+            any(d.rule_id == "PROVIDER_OVERRIDE_VERSION_MISMATCH" for d in result.diagnostics)
+        )
+
+    @unittest.skipIf(os.name == "nt", "resolves a POSIX shell script as the provider binary")
+    def test_exact_override_remains_pinned(self):
+        spec = matrix.get("deckhtml")
+        fake = self.home / "exact-deckhtml"
+        fake.write_text(f"#!/bin/sh\necho {spec.version}\n", encoding="utf-8")
+        fake.chmod(0o755)
+        result = resolver.resolve(
+            spec, home=self.home, bin_overrides={"deckhtml": str(fake)}
+        )
+        self.assertTrue(result.to_json()["pinned"])
+        self.assertFalse(result.diagnostics)
 
     def test_policy_never_refuses_instead_of_downloading(self):
         with mock.patch("shutil.which", return_value="/usr/bin/npm"), \
@@ -310,6 +326,29 @@ class ManagedCacheTest(unittest.TestCase):
                 json.dumps({"version": spec.version}), encoding="utf-8"
             )
             self.assertEqual(acquire_npm.installed_version(prefix, spec), spec.version)
+
+    def test_npm_cache_with_the_wrong_actual_version_is_not_ready(self):
+        spec = matrix.get("deckhtml")
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            prefix = acquire_npm.install_dir(home, spec)
+            package = prefix / "node_modules" / "@deckflow" / "deckhtml"
+            binary = acquire_npm.bin_path(prefix, spec)
+            package.mkdir(parents=True)
+            binary.parent.mkdir(parents=True)
+            (package / "package.json").write_text(
+                json.dumps({"version": "9.9.9"}), encoding="utf-8"
+            )
+            binary.write_text("wrong", encoding="utf-8")
+            self.assertIsNone(resolver._managed(spec, home))
+
+    def test_python_cache_with_the_wrong_actual_version_is_not_ready(self):
+        spec = matrix.get("extract")
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            target = acquire_pypi.install_dir(home, spec)
+            (target / "deckflow_extract-9.9.9.dist-info").mkdir(parents=True)
+            self.assertIsNone(resolver._managed(spec, home))
 
 
 if __name__ == "__main__":

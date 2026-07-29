@@ -21,7 +21,7 @@ from . import __version__
 from .commands import editor as editor_cmd, export_pptx, parse as parse_cmd, providers_cmd
 from .diagnostics import Diagnostic
 from .envelope import STATUS_FAILED, Envelope
-from .exits import EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, CoreError
+from .exits import EXIT_INTERRUPT, EXIT_OK, EXIT_OUTPUT, EXIT_USAGE, CoreError
 from .fsutil import atomic_write_text
 from .providers import resolve as resolver
 
@@ -226,6 +226,95 @@ def _normalize(options: argparse.Namespace) -> argparse.Namespace:
     return options
 
 
+def _prepare_report_path(options: argparse.Namespace) -> None:
+    """Resolve and validate the report before any provider or project can run.
+
+    A report is an output in its own right. It may not alias another output,
+    overwrite an input, or land inside the canonical ``project/deck`` tree.
+    Clearing ``options.report`` before validation also ensures that a rejected
+    report path is never used while emitting the failure envelope.
+    """
+    raw = getattr(options, "report", None)
+    if not raw:
+        return
+
+    options.report = None
+    report = Path(raw).expanduser().resolve()
+    conflicts: list[tuple[str, Path]] = []
+
+    def protect(label: str, value: str | Path | None) -> None:
+        if value is None:
+            return
+        protected = Path(value).expanduser().resolve()
+        if report == protected:
+            conflicts.append((label, protected))
+
+    protect("input", getattr(options, "input", None))
+    protect("output", getattr(options, "output", None))
+    protect("browser executable", getattr(options, "browser", None))
+    for name, path in getattr(options, "provider_bins", {}).items():
+        protect(f"{name} provider executable", path)
+
+    if getattr(options, "command", None) == "parse":
+        output_root = Path(options.out).expanduser().resolve()
+        if report == output_root or output_root in report.parents:
+            conflicts.append(("parse output directory", output_root))
+
+    project_value = getattr(options, "project", None)
+    if project_value:
+        project_root = Path(project_value).expanduser().resolve()
+        deck_root = project_root / "deck"
+        if report == deck_root or deck_root in report.parents:
+            conflicts.append(("canonical deck tree", deck_root))
+        for relative in ("deck-plan.json", "intent-detail.json"):
+            protect(f"project record {relative}", project_root / relative)
+
+    if conflicts:
+        label, protected = conflicts[0]
+        raise CoreError(
+            Diagnostic(
+                rule_id="REPORT_PATH_CONFLICT",
+                severity="error",
+                message=f"The report path conflicts with the command's {label}.",
+                location=str(report),
+                expected="a distinct report path that cannot overwrite command inputs or outputs",
+                actual=f"same as or inside {protected}",
+                recovery="Choose a separate --report path outside the parse bundle and canonical deck tree.",
+            ),
+            exit_code=EXIT_OUTPUT,
+        )
+
+    if report.is_dir():
+        raise CoreError(
+            Diagnostic(
+                rule_id="REPORT_NOT_A_FILE",
+                severity="error",
+                message="The report target is a directory.",
+                location=str(report),
+                expected="a JSON file path",
+                actual="an existing directory",
+                recovery="Choose a file path for --report.",
+            ),
+            exit_code=EXIT_OUTPUT,
+        )
+
+    overwrite = bool(getattr(options, "overwrite", False))
+    if report.exists() and not overwrite:
+        raise CoreError(
+            Diagnostic(
+                rule_id="REPORT_EXISTS",
+                severity="error",
+                message="The report target already exists.",
+                location=str(report),
+                expected="a new report path, or an explicit --overwrite",
+                actual="an existing path",
+                recovery="Choose another --report path, or pass --overwrite on commands that support it.",
+            ),
+            exit_code=EXIT_OUTPUT,
+        )
+    options.report = str(report)
+
+
 def _emit(envelope: Envelope, human: str | None, report: str | None) -> None:
     payload = envelope.dumps()
     if report:
@@ -250,6 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         options = _normalize(options)
+        _prepare_report_path(options)
         if options.command == "providers":
             envelope, human, code = providers_cmd.run(options)
         elif options.command == "editor":

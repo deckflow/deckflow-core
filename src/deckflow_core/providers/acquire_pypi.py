@@ -86,6 +86,7 @@ def _attempts(spec: ProviderSpec, target: Path) -> list[tuple[str, list[str]]]:
 
 def acquire(spec: ProviderSpec, home: Path, *, timeout: int = 600) -> Path:
     target = install_dir(home, spec)
+    _cleanup(target)
     target.mkdir(parents=True, exist_ok=True)
 
     failures: list[str] = []
@@ -130,7 +131,7 @@ def acquire(spec: ProviderSpec, home: Path, *, timeout: int = 600) -> Path:
         )
 
     found = installed_version(target, spec)
-    if found is None:
+    if found != spec.version:
         _cleanup(target)
         raise CoreError(
             Diagnostic(
@@ -138,8 +139,8 @@ def acquire(spec: ProviderSpec, home: Path, *, timeout: int = 600) -> Path:
                 severity="error",
                 message=f"{spec.requirement} installed but could not be verified.",
                 location=str(target),
-                expected=f"a {spec.package} dist-info directory",
-                actual="no matching dist-info found",
+                expected=f"a {spec.package} {spec.version} dist-info directory",
+                actual=f"installed version={found}",
                 recovery="Remove the directory and retry, or install the provider manually.",
             ),
             exit_code=EXIT_EXECUTION,

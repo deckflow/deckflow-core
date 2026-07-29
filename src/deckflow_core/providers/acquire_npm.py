@@ -154,6 +154,7 @@ def acquire(spec: ProviderSpec, home: Path, *, timeout: int = 600) -> Path:
         )
 
     prefix = install_dir(home, spec)
+    _cleanup(prefix)
     prefix.mkdir(parents=True, exist_ok=True)
     # npm refuses to treat a bare directory as an install prefix without one.
     manifest = prefix / "package.json"
@@ -215,7 +216,7 @@ def acquire(spec: ProviderSpec, home: Path, *, timeout: int = 600) -> Path:
     # Verify before it counts as installed: a half-installed provider that
     # still resolves is worse than one that is plainly absent.
     found = installed_version(prefix, spec)
-    if found is None or not bin_path(prefix, spec).exists():
+    if found != spec.version or not bin_path(prefix, spec).exists():
         _cleanup(prefix)
         raise CoreError(
             Diagnostic(
@@ -223,7 +224,7 @@ def acquire(spec: ProviderSpec, home: Path, *, timeout: int = 600) -> Path:
                 severity="error",
                 message=f"{spec.requirement} installed but could not be verified.",
                 location=str(prefix),
-                expected=f"{spec.bin} executable and a readable package.json",
+                expected=f"{spec.bin} executable and exact version {spec.version}",
                 actual=f"version={found}, bin_exists={bin_path(prefix, spec).exists()}",
                 recovery="Remove the directory and retry, or install the provider manually.",
             ),

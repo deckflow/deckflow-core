@@ -29,7 +29,7 @@ from ..envelope import (
     file_record,
 )
 from ..exits import EXIT_EXECUTION, EXIT_INPUT, EXIT_OK, EXIT_OUTPUT, CoreError
-from ..fsutil import deckflow_home, require_empty_dir, sha256_file
+from ..fsutil import deckflow_home, require_empty_dir, resolve_within, sha256_file
 from ..providers import matrix
 from ..providers import resolve as resolver
 
@@ -142,6 +142,81 @@ def _bundle_outputs(out: Path) -> list[dict[str, Any]]:
     return outputs
 
 
+def _refuse_unsafe_overwrite(out: Path, actual: str) -> None:
+    raise CoreError(
+        Diagnostic(
+            rule_id="PARSE_OVERWRITE_UNOWNED",
+            severity="error",
+            message="Refusing to replace a directory that is not a valid Parse Bundle.",
+            location=str(out),
+            expected=(
+                "a deckflow-extract bundle containing a valid parse-manifest.json, "
+                "document, and assets directory"
+            ),
+            actual=actual,
+            recovery="Choose a new --out directory. Move unrelated files manually if they are no longer needed.",
+        ),
+        exit_code=EXIT_OUTPUT,
+    )
+
+
+def _require_safe_output(out: Path, *, overwrite: bool) -> None:
+    """Allow replacement only for a complete deckflow-extract-owned bundle."""
+    require_empty_dir(out, overwrite=overwrite)
+    if not out.exists() or not any(out.iterdir()) or not overwrite:
+        return
+
+    manifest_path = out / _MANIFEST
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        _refuse_unsafe_overwrite(out, "missing a direct parse-manifest.json file")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        _refuse_unsafe_overwrite(out, f"unreadable parse-manifest.json: {error}")
+    if not isinstance(manifest, dict):
+        _refuse_unsafe_overwrite(out, "parse-manifest.json is not a JSON object")
+
+    tool = manifest.get("tool")
+    outputs = manifest.get("outputs")
+    schema_version = manifest.get("schema_version")
+    if (
+        not isinstance(tool, dict)
+        or tool.get("name") != "deckflow-extract"
+        or not isinstance(schema_version, int)
+        or schema_version < 1
+        or not isinstance(outputs, dict)
+    ):
+        _refuse_unsafe_overwrite(out, "manifest ownership or schema fields are invalid")
+
+    document_value = outputs.get("document")
+    assets_value = outputs.get("assets_dir")
+    if not isinstance(document_value, str) or not isinstance(assets_value, str):
+        _refuse_unsafe_overwrite(out, "manifest output paths are missing or invalid")
+    try:
+        document = resolve_within(out, Path(document_value))
+        assets = resolve_within(out, Path(assets_value))
+    except CoreError:
+        _refuse_unsafe_overwrite(out, "manifest output paths escape the bundle directory")
+    if not document.is_file() or not assets.is_dir():
+        _refuse_unsafe_overwrite(out, "manifest output files are incomplete")
+
+
+def _require_input_outside_output(source: Path, out: Path) -> None:
+    if source == out or out in source.parents:
+        raise CoreError(
+            Diagnostic(
+                rule_id="PARSE_OUTPUT_CONTAINS_INPUT",
+                severity="error",
+                message="The Parse Bundle output directory contains the input file.",
+                location=str(out),
+                expected="an output directory separate from the input file",
+                actual=str(source),
+                recovery="Choose --out outside the directory tree containing the input.",
+            ),
+            exit_code=EXIT_OUTPUT,
+        )
+
+
 def _carry_diagnostics(envelope: Envelope, provider_result: dict[str, Any]) -> None:
     """Surface the provider's own findings without re-judging them."""
     for entry in provider_result.get("diagnostics") or ():
@@ -181,7 +256,8 @@ def run(options: Any) -> tuple[Envelope, str | None, int]:
     envelope = Envelope(command=COMMAND)
     source = _resolve_input(options.input)
     out = Path(options.out).expanduser().resolve()
-    require_empty_dir(out, overwrite=options.overwrite)
+    _require_input_outside_output(source, out)
+    _require_safe_output(out, overwrite=options.overwrite)
 
     spec = matrix.get("extract", options.provider_specs)
     resolution = resolver.resolve(

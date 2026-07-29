@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deckflow-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Deckflow capability broker: one CLI over deckflow-extract, html-editor and deckhtml, with on-demand provider acquisition."
 requires-python = ">=3.10"
 license = "MIT"

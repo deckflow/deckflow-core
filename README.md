@@ -23,8 +23,8 @@ virtualenv, or vendored into a Skill with no install step at all.
 
 ```bash
 # Managed install — no venv, no pipx, no uv, works on a PEP 668 interpreter
-python3 -m pip install --target ~/.deckflow/core/0.1.0 deckflow-core==0.1.0
-PYTHONPATH=~/.deckflow/core/0.1.0 python3 -m deckflow_core providers
+python3 -m pip install --target ~/.deckflow/core/0.1.1 deckflow-core==0.1.1
+PYTHONPATH=~/.deckflow/core/0.1.1 python3 -m deckflow_core providers
 ```
 
 ```bash
@@ -224,7 +224,7 @@ deterministically so two isolated runs over the same inputs produce the same
 report bytes.
 
 ```json
-{"schema_version": 1, "command": "providers", "core_version": "0.1.0",
+{"schema_version": 1, "command": "providers", "core_version": "0.1.1",
  "status": "succeeded", "started_at": "...", "finished_at": "...",
  "providers": [], "inputs": [], "outputs": [], "diagnostics": []}
 ```
@@ -246,8 +246,10 @@ A failure still prints a parseable envelope on stdout; prose goes to stderr.
 
 ## Scope of this release
 
-v0.1.0 registers `providers`, `parse`, `editor` and `export pptx` — the whole
-planned surface.
+v0.1.1 registers `providers`, `parse`, `editor` and `export pptx` — the whole
+planned surface. This patch release hardens report/output collision handling,
+Parse Bundle replacement, editor page boundaries and provider version
+verification, and reports editor crashes after readiness as failures.
 
 `validate html` is deferred beyond 0.1.x and is not registered at all: a
 deferred command may not ship as a stub, a placeholder, or a "not implemented"

@@ -47,6 +47,25 @@ class PreflightTest(unittest.TestCase):
             self.assertEqual(caught.exception.diagnostic.rule_id, "EDITOR_PAGE_NOT_FOUND")
             self.assertIn("slide-01", caught.exception.diagnostic.expected)
 
+    def test_page_id_cannot_escape_the_pages_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_project(Path(root), slides=2)
+            with self.assertRaises(CoreError) as caught:
+                editor_cmd._preflight(Path(root), "../index")
+            self.assertEqual(caught.exception.diagnostic.rule_id, "EDITOR_PAGE_ID_INVALID")
+            self.assertEqual(caught.exception.exit_code, 3)
+
+    @unittest.skipIf(os.name == "nt", "creating symlinks on Windows needs elevation")
+    def test_page_symlink_cannot_escape_the_pages_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_project(Path(root), slides=1)
+            outside = Path(root) / "outside.html"
+            outside.write_text("<p>outside</p>", encoding="utf-8")
+            (Path(root) / "deck" / "pages" / "escape.html").symlink_to(outside)
+            with self.assertRaises(CoreError) as caught:
+                editor_cmd._preflight(Path(root), None)
+            self.assertEqual(caught.exception.diagnostic.rule_id, "EDITOR_PAGE_ESCAPES_ROOT")
+
     def test_preflight_does_not_require_a_complete_project(self):
         """Opening the editor is not a project validation.
 
@@ -212,6 +231,40 @@ class CliTest(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["diagnostics"][0]["rule_id"], "PROJECT_PAGES_MISSING")
             self.assertEqual(payload["providers"], [])
+
+    @unittest.skipIf(os.name == "nt", "uses a POSIX shell script as the fake editor")
+    def test_provider_crash_after_ready_is_an_execution_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            project = write_project(Path(root) / "project", slides=1)
+            fake = Path(root) / "crashing-editor"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--version\" ]; then echo 0.1.4; exit 0; fi\n"
+                "echo 'Local HTML Editor: http://127.0.0.1:4567/'\n"
+                "exit 17\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            env = {
+                **os.environ,
+                "PYTHONPATH": _SRC,
+                "DECKFLOW_HOME": str(Path(root) / "home"),
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable, "-m", "deckflow_core", "editor", str(project),
+                    "--provider-bin", f"editor={fake}", "--provider-install", "never", "--json",
+                ],
+                capture_output=True, text=True, env=env, timeout=20,
+            )
+            self.assertEqual(completed.returncode, 5)
+            final = json.loads(completed.stdout.strip().splitlines()[-1])
+            self.assertEqual(final["status"], "failed")
+            self.assertEqual(final["ended_by"], "provider-error")
+            self.assertEqual(final["provider_exit_code"], 17)
+            self.assertTrue(
+                any(d["rule_id"] == "EDITOR_PROVIDER_EXITED" for d in final["diagnostics"])
+            )
 
 
 @unittest.skipUnless(

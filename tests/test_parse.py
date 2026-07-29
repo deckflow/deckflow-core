@@ -200,6 +200,78 @@ class CliTest(unittest.TestCase):
                 json.loads(stdout)["diagnostics"][0]["rule_id"], "OUTPUT_DIRECTORY_NOT_EMPTY"
             )
 
+    def test_overwrite_refuses_an_unowned_non_empty_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "in.md"
+            source.write_text("# x", encoding="utf-8")
+            out = Path(root) / "out"
+            out.mkdir()
+            unrelated = out / "important.txt"
+            unrelated.write_text("keep", encoding="utf-8")
+            code, stdout, _ = run_parse(
+                str(source), "--out", str(out), "--overwrite", "--json",
+                "--provider-install", "never",
+            )
+            self.assertEqual(code, 6)
+            self.assertEqual(
+                json.loads(stdout)["diagnostics"][0]["rule_id"], "PARSE_OVERWRITE_UNOWNED"
+            )
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
+
+    def test_overwrite_accepts_a_complete_owned_parse_bundle(self):
+        with tempfile.TemporaryDirectory() as root:
+            out = Path(root) / "out"
+            (out / "assets").mkdir(parents=True)
+            (out / "document.md").write_text("# old", encoding="utf-8")
+            (out / "parse-manifest.json").write_text(
+                json.dumps({
+                    "schema_version": 2,
+                    "tool": {"name": "deckflow-extract", "version": "0.2.0"},
+                    "outputs": {"document": "document.md", "assets_dir": "assets"},
+                }),
+                encoding="utf-8",
+            )
+            parse_cmd._require_safe_output(out, overwrite=True)
+
+    def test_overwrite_refuses_when_the_bundle_contains_the_input(self):
+        with tempfile.TemporaryDirectory() as root:
+            out = Path(root) / "out"
+            (out / "assets").mkdir(parents=True)
+            source = out / "document.md"
+            source.write_text("# preserve me", encoding="utf-8")
+            (out / "parse-manifest.json").write_text(
+                json.dumps({
+                    "schema_version": 2,
+                    "tool": {"name": "deckflow-extract", "version": "0.2.0"},
+                    "outputs": {"document": "document.md", "assets_dir": "assets"},
+                }),
+                encoding="utf-8",
+            )
+            code, stdout, _ = run_parse(
+                str(source), "--out", str(out), "--overwrite", "--json",
+                "--provider-install", "never",
+            )
+            self.assertEqual(code, 6)
+            self.assertEqual(
+                json.loads(stdout)["diagnostics"][0]["rule_id"],
+                "PARSE_OUTPUT_CONTAINS_INPUT",
+            )
+            self.assertEqual(source.read_text(encoding="utf-8"), "# preserve me")
+
+    def test_report_cannot_alias_the_input_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "in.md"
+            source.write_text("# preserve me", encoding="utf-8")
+            code, stdout, _ = run_parse(
+                str(source), "--out", str(Path(root) / "out"),
+                "--report", str(source), "--json", "--provider-install", "never",
+            )
+            self.assertEqual(code, 6)
+            self.assertEqual(
+                json.loads(stdout)["diagnostics"][0]["rule_id"], "REPORT_PATH_CONFLICT"
+            )
+            self.assertEqual(source.read_text(encoding="utf-8"), "# preserve me")
+
     def test_input_is_checked_before_the_provider_is_touched(self):
         code, stdout, _ = run_parse(
             "https://example.com", "--out", "/tmp/never-created", "--json",

@@ -115,6 +115,23 @@ class ReportTest(unittest.TestCase):
             run_cli("providers", "--report", str(report))
             self.assertEqual(json.loads(report.read_text())["command"], "providers")
 
+    def test_existing_report_is_not_silently_overwritten(self):
+        with tempfile.TemporaryDirectory() as root:
+            report = Path(root) / "providers.json"
+            report.write_text("keep me", encoding="utf-8")
+            code, stdout, _ = run_cli("providers", "--json", "--report", str(report))
+            self.assertEqual(code, 6)
+            self.assertEqual(json.loads(stdout)["diagnostics"][0]["rule_id"], "REPORT_EXISTS")
+            self.assertEqual(report.read_text(encoding="utf-8"), "keep me")
+
+    def test_report_target_cannot_be_a_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            code, stdout, _ = run_cli("providers", "--report", root, "--json")
+            self.assertEqual(code, 6)
+            self.assertEqual(
+                json.loads(stdout)["diagnostics"][0]["rule_id"], "REPORT_NOT_A_FILE"
+            )
+
 
 class ProvidersListingTest(unittest.TestCase):
     def test_listing_has_no_side_effects(self):

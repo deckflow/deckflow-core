@@ -39,6 +39,7 @@ COMMAND = "editor"
 
 _ELEMENT_ID_RE = re.compile(r"""data-element-id\s*=\s*["']([^"']+)["']""")
 _URL_RE = re.compile(r"https?://[0-9A-Za-z\.\-]+:\d+\S*")
+_SLIDE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # The provider's own working files. They appear under the project root by
 # design, so they are expected artefacts rather than boundary violations.
 _EDITOR_ARTEFACTS = (".local-html-editor",)
@@ -106,7 +107,23 @@ def _preflight(root: Path, page: str | None) -> tuple[Path, Path]:
             ),
             exit_code=EXIT_INPUT,
         )
-    pages = sorted(pages_dir.glob("*.html"))
+    pages_root = pages_dir.resolve()
+    page_candidates = sorted(candidate for candidate in pages_dir.glob("*.html") if candidate.is_file())
+    escaped = [candidate for candidate in page_candidates if candidate.resolve().parent != pages_root]
+    if escaped:
+        raise CoreError(
+            Diagnostic(
+                rule_id="EDITOR_PAGE_ESCAPES_ROOT",
+                severity="error",
+                message="A canonical page resolves outside deck/pages/.",
+                location=str(escaped[0]),
+                expected=f"a direct HTML file inside {pages_root}",
+                actual=str(escaped[0].resolve()),
+                recovery="Replace the escaping symlink with a real canonical page inside deck/pages/.",
+            ),
+            exit_code=EXIT_INPUT,
+        )
+    pages = [candidate.resolve() for candidate in page_candidates]
     if not pages:
         raise CoreError(
             Diagnostic(
@@ -121,15 +138,29 @@ def _preflight(root: Path, page: str | None) -> tuple[Path, Path]:
             exit_code=EXIT_INPUT,
         )
     if page is None:
-        return deck_dir, pages_dir
-    target = pages_dir / f"{page}.html"
-    if not target.is_file():
+        return deck_dir, pages_root
+    if not _SLIDE_ID_RE.fullmatch(page):
+        raise CoreError(
+            Diagnostic(
+                rule_id="EDITOR_PAGE_ID_INVALID",
+                severity="error",
+                message="The requested page is not a safe slide id.",
+                location=page,
+                expected="an alphanumeric slide id containing only letters, digits, dot, underscore, or hyphen",
+                actual=page,
+                recovery="Pass the stem of a direct deck/pages/*.html file, without path separators or `..`.",
+            ),
+            exit_code=EXIT_INPUT,
+        )
+    pages_by_id = {candidate.stem: candidate for candidate in pages}
+    target = pages_by_id.get(page)
+    if target is None:
         raise CoreError(
             Diagnostic(
                 rule_id="EDITOR_PAGE_NOT_FOUND",
                 severity="error",
                 message=f"No canonical page named {page}.",
-                location=str(target),
+                location=str(pages_root / f"{page}.html"),
                 expected=f"one of: {', '.join(p.stem for p in pages)}",
                 actual=page,
                 recovery="Pass --page with a slide id that exists, or omit it to open all pages.",
@@ -318,8 +349,11 @@ def run(options: Any) -> tuple[Envelope, str | None, int]:
     )
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
+    drainers: list[threading.Thread] = []
     for stream, sink in ((child.stdout, stdout_lines), (child.stderr, stderr_lines)):
-        threading.Thread(target=_drain, args=(stream, sink), daemon=True).start()
+        thread = threading.Thread(target=_drain, args=(stream, sink), daemon=True)
+        thread.start()
+        drainers.append(thread)
 
     url = _await_ready(stdout_lines, child)
     if url is None:
@@ -345,16 +379,36 @@ def run(options: Any) -> tuple[Envelope, str | None, int]:
     sys.stderr.write("[deckflow] press Ctrl-C when you are done editing\n")
 
     interrupted = _wait_for_session_end(child)
+    for thread in drainers:
+        thread.join(timeout=1)
+    provider_exit_code = child.poll()
+    provider_failed = not interrupted and provider_exit_code != 0
+    provider_output = summarize_output("\n".join(stderr_lines), "\n".join(stdout_lines))
 
     after = _snapshot(deck_dir)
     changed_pages, findings = _classify(before, after)
     envelope.extend(findings)
+    if provider_failed:
+        envelope.add(
+            Diagnostic(
+                rule_id="EDITOR_PROVIDER_EXITED",
+                severity="error",
+                message="The editor provider exited unexpectedly after announcing readiness.",
+                location=str(target),
+                expected="exit code 0, or a session ended by the supervising interrupt",
+                actual=f"exit code {provider_exit_code}: {provider_output}",
+                recovery="Restore any affected pages from the editor backups, then re-run the session.",
+            )
+        )
     envelope.extra.update({
         "event": "finished",
         "session_id": session_id,
         "project": str(deck_dir.parent),
         "changed_pages": changed_pages,
-        "ended_by": "interrupt" if interrupted else "editor-exit",
+        "ended_by": (
+            "interrupt" if interrupted else "provider-error" if provider_failed else "editor-exit"
+        ),
+        "provider_exit_code": provider_exit_code,
         "backups": str(deck_dir / ".local-html-editor" / "backups"),
     })
 
@@ -388,4 +442,6 @@ def run(options: Any) -> tuple[Envelope, str | None, int]:
 
     has_error = any(d.severity == "error" for d in envelope.diagnostics)
     envelope.status = STATUS_FAILED if has_error else STATUS_SUCCEEDED
+    if provider_failed:
+        return envelope, None, EXIT_EXECUTION
     return envelope, None, EXIT_CONTRACT if has_error else EXIT_OK

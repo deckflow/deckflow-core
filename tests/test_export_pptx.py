@@ -99,6 +99,20 @@ class PreconditionTest(unittest.TestCase):
                 json.loads(stdout)["diagnostics"][0]["rule_id"], "OUTPUT_EXTENSION_UNEXPECTED"
             )
 
+    def test_report_cannot_alias_the_pptx_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_project(Path(root), slides=1)
+            target = Path(root) / "deck.pptx"
+            code, stdout, _ = run_export(
+                root, "--output", str(target), "--report", str(target),
+                "--json", "--provider-install", "never",
+            )
+            self.assertEqual(code, 6)
+            self.assertEqual(
+                json.loads(stdout)["diagnostics"][0]["rule_id"], "REPORT_PATH_CONFLICT"
+            )
+            self.assertFalse(target.exists())
+
     def test_missing_provider_under_never_is_a_provider_error(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as home:
             write_project(Path(root), slides=1)
