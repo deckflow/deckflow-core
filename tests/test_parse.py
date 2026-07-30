@@ -199,7 +199,7 @@ class CredentialWithholdingTest(unittest.TestCase):
             env = parse_cmd._environ(cloud=False)
         self.assertEqual(
             env["DECKFLOW_EXTRACT_HOME"],
-            "/tmp/deckflow-test-home/parse",
+            str(Path("/tmp/deckflow-test-home") / "parse"),
         )
 
     def test_cloud_secrets_are_kept_only_for_explicit_cloud_mode(self) -> None:
@@ -215,7 +215,7 @@ class CredentialWithholdingTest(unittest.TestCase):
             env = parse_cmd._environ(cloud=True)
         self.assertIn("DECKFLOW_API_KEY", env)
         self.assertNotIn("DECKFLOW_NO_STORED_CREDENTIALS", env)
-        self.assertEqual(env["DECKFLOW_CONFIG_DIR"], "/tmp/deckflow-home")
+        self.assertEqual(env["DECKFLOW_CONFIG_DIR"], str(Path("/tmp/deckflow-home")))
 
 
 class StatusAndSanitizationTest(unittest.TestCase):
