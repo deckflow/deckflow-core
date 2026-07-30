@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from . import __version__
 from .commands import auth as auth_cmd
@@ -34,13 +35,14 @@ from .fsutil import atomic_write_text
 _EPILOG = """\
 network policy:
   Core reaches the network to acquire its pinned provider, and for `update`.
-  Source files and extracted content are never uploaded, and the provider's
-  cloud mode is only used when you ask for it.
+  Parse defaults to local-only; a source is uploaded only when you explicitly
+  pass `--mode cloud`.
 
 writes:
   env setup/clean and update touch only $DECKFLOW_HOME (default ~/.deckflow).
   `auth` writes the shared credential file through the provider, never directly.
-  Nothing is installed globally and no project directory is modified.
+  `parse` atomically updates only <project>/source-bundle and an optional report.
+  Nothing is installed globally.
 
 exit codes:
   0 succeeded/partial  2 usage  3 input/precondition
@@ -52,7 +54,7 @@ exit codes:
 class _Parser(argparse.ArgumentParser):
     """Argparse exits 2 on usage errors; keep the message on stderr."""
 
-    def error(self, message: str) -> Any:  # noqa: D401
+    def error(self, message: str) -> Any:
         self.print_usage(sys.stderr)
         sys.stderr.write(f"{self.prog}: error: {message}\n")
         raise SystemExit(EXIT_USAGE)
@@ -147,30 +149,41 @@ def build_parser() -> argparse.ArgumentParser:
 
     parse = subcommands.add_parser(
         "parse", parents=[common],
-        help="extract one local file into a Parse Bundle",
+        help="ingest one local file into a project's canonical Source Bundle",
         description=(
-            "Extract one local file into a Parse Bundle (parse-manifest.json + document.md "
-            "+ assets/) via the deckflow-extract provider, acquired on demand (~4MB). Runs "
-            "locally: the file is never uploaded, and cloud credentials in the environment "
-            "are withheld from the provider unless you pass --mode cloud. Writes only the "
-            "--out directory and the optional --report; no project state is touched. The "
-            "bundle is passed through untouched, including the provider's gaps and "
-            "recommendations — deciding among them is yours, not core's. Accepts a local "
-            "file only, not a URL."
+            "Parse one direct local file through deckflow-extract, validate the transient "
+            "result, and atomically append it to the canonical Source Bundle at "
+            "<project>/source-bundle. The Parse Bundle "
+            "is an internal temporary artifact and is never exposed to the caller. brief "
+            "and deck-language are stored as metadata without AI interpretation or "
+            "translation. Local mode never uploads the source; cloud credentials are "
+            "withheld unless --mode cloud is explicit."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parse.add_argument("input", metavar="<file>", help="one existing local file")
-    parse.add_argument("--out", required=True, metavar="DIR", help="Parse Bundle directory")
-    parse.add_argument("--overwrite", action="store_true", help="replace a non-empty --out")
+    parse.add_argument("--project", required=True, metavar="DIR", help="existing Deck project")
+    parse.add_argument("--brief", required=True, help="user task text; stored without AI rewriting")
+    parse.add_argument(
+        "--deck-language",
+        required=True,
+        dest="deck_language",
+        help="BCP 47 language of the eventual Deck; distinct from detected source language",
+    )
+    parse.add_argument("--title", help="optional Source Bundle title")
+    parse.add_argument(
+        "--replace",
+        action="store_true",
+        help="rebuild a draft/review-ready Source Bundle from only this input",
+    )
     parse.add_argument(
         "--mode", choices=("local", "cloud"), default="local",
         help="cloud uploads the source and consumes quota; local is the default and never does",
     )
     parse.add_argument(
-        "--upgrade", choices=("never", "ask", "auto"), default="never",
-        help="whether the provider may fetch a heavier parsing engine (default: never)",
+        "--upgrade", choices=("never", "auto"), default="never",
+        help="auto explicitly authorizes a local engine download; default: never",
     )
     parse.add_argument("--type", metavar="FORMAT", help="override format detection")
     parse.add_argument("--ocr", choices=("off", "auto"), help="local OCR for scanned input")
@@ -249,9 +262,9 @@ def _prepare_report_path(options: argparse.Namespace) -> None:
     protect("extract executable", getattr(options, "extract_bin", None))
 
     if getattr(options, "command", None) == "parse":
-        output_root = Path(options.out).expanduser().resolve()
+        output_root = Path(options.project).expanduser().resolve() / "source-bundle"
         if report == output_root or output_root in report.parents:
-            conflicts.append(("parse output directory", output_root))
+            conflicts.append(("Source Bundle output directory", output_root))
 
     if conflicts:
         label, protected = conflicts[0]
@@ -263,7 +276,7 @@ def _prepare_report_path(options: argparse.Namespace) -> None:
                 location=str(report),
                 expected="a distinct report path that cannot overwrite command inputs or outputs",
                 actual=f"same as or inside {protected}",
-                recovery="Choose a separate --report path outside the parse bundle.",
+                recovery="Choose a separate --report path outside the Source Bundle.",
             ),
             exit_code=EXIT_OUTPUT,
         )
@@ -282,17 +295,16 @@ def _prepare_report_path(options: argparse.Namespace) -> None:
             exit_code=EXIT_OUTPUT,
         )
 
-    overwrite = bool(getattr(options, "overwrite", False))
-    if report.exists() and not overwrite:
+    if report.exists():
         raise CoreError(
             Diagnostic(
                 rule_id="REPORT_EXISTS",
                 severity="error",
                 message="The report target already exists.",
                 location=str(report),
-                expected="a new report path, or an explicit --overwrite",
+                expected="a new report path",
                 actual="an existing path",
-                recovery="Choose another --report path, or pass --overwrite on commands that support it.",
+                recovery="Choose another --report path.",
             ),
             exit_code=EXIT_OUTPUT,
         )
@@ -370,4 +382,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_INTERRUPT
 
 
-__all__ = ["main", "build_parser"]
+__all__ = ["build_parser", "main"]

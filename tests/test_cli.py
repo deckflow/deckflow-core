@@ -14,6 +14,7 @@ from pathlib import Path
 
 from deckflow_core import __version__
 from deckflow_core.cli import main
+from deckflow_core.extract import pin
 
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -25,7 +26,11 @@ def run_cli(*args: str, home: str | None = None) -> tuple[int, str, str]:
     env.pop("DECKFLOW_EXTRACT_BIN", None)
     completed = subprocess.run(
         [sys.executable, "-m", "deckflow_core", *args],
-        capture_output=True, text=True, env=env, timeout=120,
+        capture_output=True,
+        check=False,
+        text=True,
+        env=env,
+        timeout=120,
     )
     return completed.returncode, completed.stdout, completed.stderr
 
@@ -166,7 +171,7 @@ class EnvCommandTest(unittest.TestCase):
             self.assertEqual(payload["extract"]["status"], "not-acquired")
 
     def test_check_discloses_the_download_before_a_long_job(self):
-        code, stdout, _ = run_cli("env", "check")
+        _, stdout, _ = run_cli("env", "check")
         extract = json.loads(stdout)["extract"]
         self.assertIn("download_mb", extract)
         self.assertIn(extract["status"], ("ready", "not-acquired"))
@@ -181,7 +186,7 @@ class EnvCommandTest(unittest.TestCase):
 
     def test_clean_removes_only_the_managed_extract(self):
         with tempfile.TemporaryDirectory() as home:
-            managed = Path(home) / "extract" / "0.3.0"
+            managed = Path(home) / "extract" / pin.VERSION
             managed.mkdir(parents=True)
             (Path(home) / "credentials").write_text("{}", encoding="utf-8")
             (Path(home) / "parse").mkdir()
@@ -210,7 +215,8 @@ class InProcessTest(unittest.TestCase):
         # Collapse the help text's own wrapping before matching phrases.
         text = " ".join(stdout.getvalue().split())
         self.assertIn("network policy", text)
-        self.assertIn("are never uploaded", text)
+        self.assertIn("defaults to local-only", text)
+        self.assertIn("--mode cloud", text)
         self.assertIn("exit codes", text)
         self.assertIn("$DECKFLOW_HOME", text)
         self.assertIn("Nothing is installed globally", text)

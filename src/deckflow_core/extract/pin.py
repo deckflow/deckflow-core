@@ -16,12 +16,12 @@ PACKAGE = "deckflow-extract"
 MODULE = "deckflow_extract"
 BIN = "deckflow-extract"
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
-# The range an install already on PATH may satisfy.  0.3.0 is the floor because
-# that is the first version reading `~/.deckflow/credentials`, which the whole
-# shared-credential contract with DeckHTML depends on.
-COMPATIBLE = ">=0.3.0 <0.4.0"
+# 0.3.1 is the floor because core's canonical Source Bundle ingestion relies
+# on its structured acquisition result, command-free recommendations and
+# logical asset locator preservation.
+COMPATIBLE = ">=0.3.1 <0.4.0"
 
 DOWNLOAD_MB = 4
 
@@ -38,6 +38,13 @@ SOURCE = (
 REQUIREMENT = f"{PACKAGE}=={VERSION}"
 
 __all__ = [
-    "PACKAGE", "MODULE", "BIN", "VERSION", "COMPATIBLE",
-    "DOWNLOAD_MB", "INDEX_URL", "SOURCE", "REQUIREMENT",
+    "BIN",
+    "COMPATIBLE",
+    "DOWNLOAD_MB",
+    "INDEX_URL",
+    "MODULE",
+    "PACKAGE",
+    "REQUIREMENT",
+    "SOURCE",
+    "VERSION",
 ]

@@ -11,8 +11,9 @@ deckflow update   install a newer core beside the running one    ✅
 ```
 
 Core is a **capability broker**: it owns the CLI contract, the result envelope,
-the version pin and the safety policy. The provider owns the actual work, stays
-independently versioned, and is only fetched when a command needs it.
+the version pin, the safety policy, and canonical Source Bundle assembly. The
+provider owns parsing and optional parsing engines, stays independently
+versioned, and is only fetched when a command needs it.
 
 ## What core deliberately does not broker
 
@@ -66,8 +67,8 @@ deckflow env check
 
 ```bash
 # Or a managed install by hand — no venv, works on a PEP 668 interpreter
-python3 -m pip install --target ~/.deckflow/core/0.3.0 deckflow-core==0.3.0
-PYTHONPATH=~/.deckflow/core/0.3.0 python3 -m deckflow_core env check
+python3 -m pip install --target ~/.deckflow/core/0.3.1 deckflow-core==0.3.1
+PYTHONPATH=~/.deckflow/core/0.3.1 python3 -m deckflow_core env check
 ```
 
 Requires Python 3.10+. Node.js is not involved anywhere in core.
@@ -90,14 +91,14 @@ JSON is the default output. `--human` is the opt-in, for people.
 
 ```json
 {
-  "schema_version": 2, "command": "env check", "core_version": "0.3.0",
+  "schema_version": 2, "command": "env check", "core_version": "0.3.1",
   "status": "succeeded",
-  "extract": { "status": "not-acquired", "pinned_version": "0.3.0",
+  "extract": { "status": "not-acquired", "pinned_version": "0.3.1",
                "resolution": "missing", "acquired": false, "download_mb": 4 },
   "env": {
     "skill":   { "name": "gezhe-ppt", "version": "0.4.0-beta.2",
                  "root": "/…/gezhe-ppt", "version_source": "frontmatter" },
-    "runtime": { "version": "0.3.0", "installation": "managed", "location": "…" },
+    "runtime": { "version": "0.3.1", "installation": "managed", "location": "…" },
     "python":  { "version": "3.14.5", "executable": "/opt/homebrew/bin/python3",
                  "satisfies_requires_python": true, "externally_managed": true },
     "cloud":   { "available": false, "reason": "extract-not-acquired",
@@ -130,9 +131,9 @@ deckflow auth set-key --stdin     # a space worker secret; no browser needed
 
 The credential lives in `~/.deckflow/credentials` and is **shared with
 DeckHTML**. Core owns none of it: every action here forwards to
-`deckflow-extract`, which owns that file's merge rules. This is core's one
-exception to "core writes only `--out` and `--report`", and it is delegated
-rather than reimplemented.
+`deckflow-extract`, which owns that file's merge rules. Credential writes are
+delegated rather than reimplemented; `parse` is the only command that changes
+project state, and it is limited to `<project>/source-bundle`.
 
 Two consequences worth knowing:
 
@@ -150,34 +151,49 @@ There is no `logout`. Clear a stored credential with
 ## `deckflow parse`
 
 ```bash
-deckflow parse <file> --out <dir> [--report r.json] [--overwrite]
+deckflow parse <file> \
+  --project <deck-project> \
+  --brief "<user task>" \
+  --deck-language <bcp47> \
+  [--replace] [--upgrade auto] [--report r.json]
 ```
 
-Extracts one local file into a Parse Bundle (`parse-manifest.json` +
-`document.md` + `assets/`) through the deckflow-extract provider.
+Parses one direct local file, validates the provider's transient Parse Bundle,
+and atomically appends the accepted result to
+`<project>/source-bundle`. Luna calls this command once; it does not import or
+inspect the intermediate bundle.
 
-Deliberately thin — the provider already has a well-shaped contract, so core
-adds boundaries and gets out of the way:
-
-- **the bundle passes through untouched.** Core does not rewrite `document.md`,
-  recompute fidelity, or invent a second artifact vocabulary alongside it.
-- **`recommendations[]` reaches the caller verbatim.** When the provider says a
-  heavier engine would extract 65 images instead of 5, that surfaces as an
-  `info` diagnostic — choosing is the caller's job, never core's.
-- **engine upgrades default to `never`.** Provider *acquisition* happens
-  automatically, but the provider's own optional engines (56MB PDF, 107MB OCR)
-  change what the extraction produces, so they are opt-in via `--upgrade`.
-- **`--mode local` is forced and cloud credentials are withheld**, and
-  `--fetch-remote-images off` is passed explicitly so a change in the
-  provider's defaults cannot put the content plane on the network. Withholding
-  means both halves: the credential variables are removed from the child
-  environment *and* `DECKFLOW_NO_STORED_CREDENTIALS=1` is set, because the
-  provider also reads `~/.deckflow/credentials` — the file it shares with
-  DeckHTML — where a logged-in machine would otherwise hand back exactly what
-  was just removed.
+- **No AI is used.** `brief` is stored after trimming outer whitespace.
+  `deck-language` is the eventual Deck language. The parser's independently
+  detected `source_language` is stored under `manifest.imports[]`; no
+  translation happens here.
+- **Only usable results are committed.** The input SHA-256, schema, paths,
+  files, asset hashes, locator profile, provider report, fidelity, coverage,
+  gaps and decision must close. `decision.usable` must be true and no gap may
+  be blocking.
+- **The canonical write is transactional.** Core builds and validates a sibling
+  staging directory, computes the Source Bundle fingerprint, and then swaps it
+  into place. Any failure leaves the old bundle unchanged.
+- **draft and review-ready bundles accept append.** `--replace` rebuilds one
+  from the current input. A `confirmed` Source Bundle is immutable through this
+  command because changing it also requires downstream invalidation.
+- **engine upgrades default to `never`.** Explicit `--upgrade auto` authorizes
+  extract to install, self-check, activate and reselect one local enhancement.
+  If installation fails but the fallback is usable, the bundle is committed
+  and core reports `partial`.
+- **The Parse Bundle is private.** Its directory, manifest path and provider
+  command never appear in stdout, reports or canonical provenance. Sanitized
+  fidelity, coverage, gaps, recommendations and acquisition outcome remain
+  available for audit.
+- **Local mode is explicit and cloud credentials are withheld unless
+  `--mode cloud` is passed.** `--fetch-remote-images off` is also passed so a
+  change in provider defaults cannot put local content on the network.
+  Withholding means both halves: credential variables are removed from the
+  child environment and `DECKFLOW_NO_STORED_CREDENTIALS=1` is set, because the
+  provider also reads `~/.deckflow/credentials`.
 - **URLs are refused.** The provider can fetch them; core does not, because
   "the content plane never reaches the network" is not worth stating with an
-  exception in it. The refusal names the direct provider command.
+  exception in it.
 
 ## How the provider is resolved
 
@@ -239,7 +255,7 @@ Two separate planes:
 | Plane | Policy |
 | --- | --- |
 | Providers (fetching code) | network allowed, for the pinned package from declared indexes only, written only to the managed home, always reported |
-| Content (sources, extracted text, assets) | never uploaded. The provider's cloud mode is used only when you explicitly ask for it; the presence of an API key is not authorization |
+| Content (sources, extracted text, assets) | local mode never uploads; the provider's cloud mode uploads only when you explicitly ask for it, and the presence of an API key is not authorization |
 
 ## Output contract
 
@@ -248,7 +264,7 @@ deterministically so two isolated runs over the same inputs produce the same
 report bytes.
 
 ```json
-{"schema_version": 2, "command": "env check", "core_version": "0.3.0",
+{"schema_version": 2, "command": "env check", "core_version": "0.3.1",
  "status": "succeeded", "started_at": "...", "finished_at": "...",
  "extract": null, "inputs": [], "outputs": [], "diagnostics": []}
 ```
@@ -275,11 +291,16 @@ same shape rather than a traceback.
 
 ## Scope of this release
 
-v0.3.0 registers `env`, `auth`, `parse` and `update`, and that is the whole
-surface. `editor`, `export`, `validate` and `providers` are not registered at
-all: an unregistered name is an argparse invalid choice and exit 2, never a stub
-or a "not implemented" response, because either would put the name in `--help`
-and let a caller believe core owns the capability.
+v0.3.1 keeps `env`, `auth`, `parse` and `update` as the complete command
+surface, and changes `parse` into the transactional canonical Source Bundle
+ingestion entrypoint. It distinguishes caller-supplied Deck language from
+parser-detected source language, supports draft/review-ready append and
+replace, and keeps confirmed bundles immutable.
+
+`editor`, `export`, `validate` and `providers` are not registered at all: an
+unregistered name is an argparse invalid choice and exit 2, never a stub or a
+"not implemented" response, because either would put the name in `--help` and
+let a caller believe core owns the capability.
 
 `providers` is on that list because it was core's own word for one package. The
 resolution ladder, the pin and the managed install all survive — the noun does

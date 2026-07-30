@@ -1,22 +1,20 @@
-"""`deckflow parse` — one local file into a Parse Bundle via the extract provider.
+"""`deckflow parse` — one local file into the project's canonical Source Bundle.
 
-Deliberately thin. `deckflow-extract` already has a well-shaped contract — a
-real status machine, a fidelity vector, gap accounting and executable
-recommendations — so core adds boundaries and gets out of the way:
-
-- the Parse Bundle is passed through untouched. Core does not rewrite
-  `document.md`, recompute fidelity, or invent a second artifact vocabulary;
-- `recommendations[]` reaches the caller verbatim. Choosing among them is the
-  Skill's decision and the user's, never core's;
-- the engine ladder stays the provider's business. Core manages the *provider*;
-  the provider manages its own optional engines.
+The extract provider remains a pure parser. Core gives it a transient output
+directory, validates the Parse Bundle and provider report as one trust
+boundary, then delegates deterministic canonical assembly to source_bundle.
+The transient conversion is never exposed to Luna or copied into provenance.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -29,22 +27,21 @@ from ..envelope import (
 )
 from ..exits import EXIT_EXECUTION, EXIT_INPUT, EXIT_OK, EXIT_OUTPUT, CoreError
 from ..extract import resolve as extract_resolve
-from ..fsutil import require_empty_dir, resolve_within, sha256_file
+from ..fsutil import sha256_file
 from ..home import credential_env, deckflow_home
+from ..source_bundle import (
+    SourceBundleError,
+    assemble_source_bundle,
+    scrub_provenance,
+    validate_source_bundle,
+)
 
 COMMAND = "parse"
 _URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
-_MANIFEST = "parse-manifest.json"
+_BCP47_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
 
 
 def _resolve_input(raw: str) -> Path:
-    """Accept exactly one existing local file.
-
-    URLs are refused rather than forwarded. The provider can fetch them, but
-    core promises that the content plane never reaches the network, and a
-    promise with an exception in it is not worth stating. Anyone who wants a
-    URL parsed can call the provider directly.
-    """
     if _URL_RE.match(raw):
         raise CoreError(
             Diagnostic(
@@ -52,61 +49,117 @@ def _resolve_input(raw: str) -> Path:
                 severity="error",
                 message="`deckflow parse` accepts a local file, not a URL.",
                 location=raw,
-                expected="a path to an existing local file",
+                expected="a direct path to an existing local file",
                 actual="a URL",
-                recovery=(
-                    "Download the page first and parse the file, or call the provider "
-                    "directly: deckflow-extract parse <url> --out <dir>."
-                ),
+                recovery="Download the page as a local HTML file, then parse that file.",
             ),
             exit_code=EXIT_INPUT,
         )
     path = Path(raw).expanduser()
-    if not path.exists():
+    try:
+        info = path.lstat()
+    except OSError:
         raise CoreError(
             Diagnostic(
                 rule_id="PARSE_INPUT_MISSING",
                 severity="error",
                 message="The input file does not exist.",
                 location=str(path),
-                expected="an existing local file",
+                expected="an existing direct regular file",
                 actual="no such path",
                 recovery="Check the path, then re-run.",
             ),
             exit_code=EXIT_INPUT,
         )
-    if not path.is_file():
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise CoreError(
             Diagnostic(
                 rule_id="PARSE_INPUT_NOT_A_FILE",
                 severity="error",
-                message="The input must be a single file.",
+                message="The input must be a direct regular file.",
                 location=str(path),
-                expected="one file",
-                actual="a directory",
-                recovery="Parse one file per run so failures stay isolated and retries stay cheap.",
+                expected="one regular file, not a symlink",
+                actual="a directory, symlink, or special file",
+                recovery="Pass the original local file directly.",
+            ),
+            exit_code=EXIT_INPUT,
+        )
+    if info.st_nlink != 1:
+        raise CoreError(
+            Diagnostic(
+                rule_id="PARSE_INPUT_HARDLINKED",
+                severity="error",
+                message="Hard-linked inputs are not accepted for canonical ingestion.",
+                location=str(path),
+                expected="a file with one filesystem link",
+                actual=f"link count {info.st_nlink}",
+                recovery="Copy the original to a new regular file, then ingest that copy.",
             ),
             exit_code=EXIT_INPUT,
         )
     return path.resolve()
 
 
-def _build_command(resolution: extract_resolve.Extract, source: Path,
-                   out: Path, options: Any) -> list[str]:
+def _resolve_project(raw: str) -> Path:
+    project = Path(raw).expanduser()
+    try:
+        info = project.lstat()
+    except OSError:
+        info = None
+    if info is None or stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise CoreError(
+            Diagnostic(
+                rule_id="PARSE_PROJECT_INVALID",
+                severity="error",
+                message="The Deck project directory is missing or is not direct.",
+                location=str(project),
+                expected="an existing direct project directory",
+                actual="missing, non-directory, or symlink",
+                recovery="Initialize the Deck project, then pass it with --project.",
+            ),
+            exit_code=EXIT_INPUT,
+        )
+    return project.resolve()
+
+
+def _require_input_outside_bundle(source: Path, bundle: Path) -> None:
+    if source == bundle or bundle in source.parents:
+        raise CoreError(
+            Diagnostic(
+                rule_id="PARSE_OUTPUT_CONTAINS_INPUT",
+                severity="error",
+                message="The canonical Source Bundle contains the input file.",
+                location=str(bundle),
+                expected="an input outside <project>/source-bundle",
+                actual=str(source),
+                recovery="Move the original outside source-bundle, then ingest it.",
+            ),
+            exit_code=EXIT_OUTPUT,
+        )
+
+
+def _build_command(
+    resolution: extract_resolve.Extract,
+    source: Path,
+    parse_out: Path,
+    options: Any,
+) -> list[str]:
     command = [
-        *resolution.command, "parse", str(source),
-        "--out", str(out),
-        # Cloud parsing uploads the source. It happens only when the caller
-        # asks for it; a key in the environment is not a request.
-        "--mode", "cloud" if options.mode == "cloud" else "local",
-        # Off for local inputs already, but stated explicitly so a future
-        # change to the provider's default cannot quietly put the content
-        # plane on the network.
-        "--fetch-remote-images", "off",
-        "--upgrade", options.upgrade or "never",
+        *resolution.command,
+        "parse",
+        str(source),
+        "--out",
+        str(parse_out),
+        "--replace",
+        "--anchors",
+        "on",
+        "--mode",
+        "cloud" if options.mode == "cloud" else "local",
+        "--fetch-remote-images",
+        "off",
+        "--upgrade",
+        options.upgrade or "never",
     ]
-    if options.overwrite:
-        command.append("--replace")
     for flag, value in (
         ("--type", options.type),
         ("--ocr", options.ocr),
@@ -130,94 +183,67 @@ def _last_json_line(stdout: str) -> dict[str, Any] | None:
     return None
 
 
-def _bundle_outputs(out: Path) -> list[dict[str, Any]]:
-    """Record the bundle root and its manifest; leave the contents alone."""
-    outputs: list[dict[str, Any]] = [{"path": str(out), "kind": "parse-bundle"}]
-    manifest = out / _MANIFEST
-    if manifest.is_file():
-        outputs.append(
-            file_record(str(manifest), sha256=sha256_file(manifest), size=manifest.stat().st_size)
-        )
-    return outputs
+def _public_provider_result(
+    provider_result: dict[str, Any],
+    *,
+    secrets: list[str],
+) -> dict[str, Any]:
+    public = {
+        key: value
+        for key, value in provider_result.items()
+        if key not in {"bundle", "manifest", "archive"}
+    }
+    scrubbed = scrub_provenance(public, secrets=secrets)
+    return scrubbed if isinstance(scrubbed, dict) else {}
 
 
-def _refuse_unsafe_overwrite(out: Path, actual: str) -> None:
-    raise CoreError(
+def _source_error(error: SourceBundleError, bundle: Path) -> CoreError:
+    if error.code == "source-bundle-confirmed":
+        rule_id = "PARSE_SOURCE_BUNDLE_CONFIRMED"
+        exit_code = EXIT_OUTPUT
+        recovery = "Start a new project or use the future explicit invalidation workflow."
+    elif error.code == "source-already-included":
+        rule_id = "PARSE_SOURCE_ALREADY_INCLUDED"
+        exit_code = EXIT_INPUT
+        recovery = "Do not ingest the same source bytes twice."
+    elif error.code.startswith("source-") and error.code not in {
+        "source-input-changed",
+        "source-asset-copy-mismatch",
+    }:
+        rule_id = "PARSE_SOURCE_BUNDLE_INVALID"
+        exit_code = EXIT_OUTPUT
+        recovery = "Repair or move the existing Source Bundle; core will not overwrite it."
+    else:
+        rule_id = "PARSE_PROVIDER_CONTRACT_INVALID"
+        exit_code = EXIT_EXECUTION
+        recovery = "Treat this as a core/provider contract failure and inspect diagnostics."
+    return CoreError(
         Diagnostic(
-            rule_id="PARSE_OVERWRITE_UNOWNED",
+            rule_id=rule_id,
             severity="error",
-            message="Refusing to replace a directory that is not a valid Parse Bundle.",
-            location=str(out),
-            expected=(
-                "a deckflow-extract bundle containing a valid parse-manifest.json, "
-                "document, and assets directory"
-            ),
-            actual=actual,
-            recovery="Choose a new --out directory. Move unrelated files manually if they are no longer needed.",
+            message="The canonical Source Bundle was not changed.",
+            location=str(bundle),
+            expected="a validated, self-contained Luna Source Bundle",
+            actual=f"{error.code}: {error.message}",
+            recovery=recovery,
         ),
-        exit_code=EXIT_OUTPUT,
+        exit_code=exit_code,
     )
 
 
-def _require_safe_output(out: Path, *, overwrite: bool) -> None:
-    """Allow replacement only for a complete deckflow-extract-owned bundle."""
-    require_empty_dir(out, overwrite=overwrite)
-    if not out.exists() or not any(out.iterdir()) or not overwrite:
-        return
-
-    manifest_path = out / _MANIFEST
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        _refuse_unsafe_overwrite(out, "missing a direct parse-manifest.json file")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        _refuse_unsafe_overwrite(out, f"unreadable parse-manifest.json: {error}")
-    if not isinstance(manifest, dict):
-        _refuse_unsafe_overwrite(out, "parse-manifest.json is not a JSON object")
-
-    tool = manifest.get("tool")
-    outputs = manifest.get("outputs")
-    schema_version = manifest.get("schema_version")
-    if (
-        not isinstance(tool, dict)
-        or tool.get("name") != "deckflow-extract"
-        or not isinstance(schema_version, int)
-        or schema_version < 1
-        or not isinstance(outputs, dict)
-    ):
-        _refuse_unsafe_overwrite(out, "manifest ownership or schema fields are invalid")
-
-    document_value = outputs.get("document")
-    assets_value = outputs.get("assets_dir")
-    if not isinstance(document_value, str) or not isinstance(assets_value, str):
-        _refuse_unsafe_overwrite(out, "manifest output paths are missing or invalid")
-    try:
-        document = resolve_within(out, Path(document_value))
-        assets = resolve_within(out, Path(assets_value))
-    except CoreError:
-        _refuse_unsafe_overwrite(out, "manifest output paths escape the bundle directory")
-    if not document.is_file() or not assets.is_dir():
-        _refuse_unsafe_overwrite(out, "manifest output files are incomplete")
-
-
-def _require_input_outside_output(source: Path, out: Path) -> None:
-    if source == out or out in source.parents:
-        raise CoreError(
-            Diagnostic(
-                rule_id="PARSE_OUTPUT_CONTAINS_INPUT",
-                severity="error",
-                message="The Parse Bundle output directory contains the input file.",
-                location=str(out),
-                expected="an output directory separate from the input file",
-                actual=str(source),
-                recovery="Choose --out outside the directory tree containing the input.",
-            ),
-            exit_code=EXIT_OUTPUT,
-        )
+def _bundle_outputs(bundle: Path) -> list[dict[str, Any]]:
+    manifest = bundle / "manifest.json"
+    return [
+        {"path": str(bundle), "kind": "source-bundle"},
+        file_record(
+            str(manifest),
+            sha256=sha256_file(manifest),
+            size=manifest.stat().st_size,
+        ),
+    ]
 
 
 def _carry_diagnostics(envelope: Envelope, provider_result: dict[str, Any]) -> None:
-    """Surface the provider's own findings without re-judging them."""
     for entry in provider_result.get("diagnostics") or ():
         if not isinstance(entry, dict):
             continue
@@ -241,11 +267,11 @@ def _carry_diagnostics(envelope: Envelope, provider_result: dict[str, Any]) -> N
                 severity="info",
                 message=f"The provider suggests '{recommended}' to improve this extraction.",
                 location=str(provider_result.get("tier") or "") or None,
-                expected="the highest fidelity this input can yield",
-                actual=str(decision.get("reason") or "a lower-cost engine was used"),
+                expected="the highest fidelity authorized for this run",
+                actual=str(decision.get("reason") or "a fallback engine was used"),
                 recovery=(
-                    "Read provider_result.recommendations[] and present the high-priority "
-                    "options alongside 'accept'. The choice is the user's, not core's."
+                    "Inspect provider_result.recommendations[]. "
+                    "Pass --upgrade auto only after local installation is authorized."
                 ),
             )
         )
@@ -254,9 +280,35 @@ def _carry_diagnostics(envelope: Envelope, provider_result: dict[str, Any]) -> N
 def run(options: Any) -> tuple[Envelope, str | None, int]:
     envelope = Envelope(command=COMMAND)
     source = _resolve_input(options.input)
-    out = Path(options.out).expanduser().resolve()
-    _require_input_outside_output(source, out)
-    _require_safe_output(out, overwrite=options.overwrite)
+    project = _resolve_project(options.project)
+    source_bundle = project / "source-bundle"
+    _require_input_outside_bundle(source, source_bundle)
+
+    brief = options.brief.strip()
+    if not brief:
+        raise CoreError(
+            Diagnostic(
+                rule_id="PARSE_BRIEF_REQUIRED",
+                severity="error",
+                message="The presentation brief cannot be empty.",
+                expected="the user's task description",
+                actual="empty or whitespace",
+                recovery="Pass the task text with --brief.",
+            ),
+            exit_code=EXIT_INPUT,
+        )
+    if not _BCP47_RE.match(options.deck_language):
+        raise CoreError(
+            Diagnostic(
+                rule_id="PARSE_DECK_LANGUAGE_INVALID",
+                severity="error",
+                message="The Deck language must be a BCP 47 tag.",
+                expected="a tag such as zh-CN or en-US",
+                actual=str(options.deck_language),
+                recovery="Pass the eventual Deck language with --deck-language.",
+            ),
+            exit_code=EXIT_INPUT,
+        )
 
     resolution = extract_resolve.resolve(
         bin_override=options.extract_bin,
@@ -269,102 +321,136 @@ def run(options: Any) -> tuple[Envelope, str | None, int]:
         file_record(str(source), sha256=sha256_file(source), size=source.stat().st_size)
     ]
 
-    command = _build_command(resolution, source, out, options)
+    workdir = Path(tempfile.mkdtemp(prefix="deckflow-parse-"))
+    parse_out = workdir / "parse-bundle"
     try:
-        completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=options.timeout,
-            env={**_environ(cloud=options.mode == "cloud"), **resolution.env},
-        )
-    except subprocess.TimeoutExpired as error:
-        raise CoreError(
-            Diagnostic(
-                rule_id="PARSE_TIMEOUT",
-                severity="error",
-                message=f"Parsing timed out after {options.timeout}s.",
-                location=str(source),
-                expected="a completed extraction",
-                actual="the provider did not finish",
-                recovery="Re-run with a longer --timeout, or with --max-pages to bound the work.",
-            ),
-            exit_code=EXIT_EXECUTION,
-        ) from error
-
-    provider_result = _last_json_line(completed.stdout)
-    if provider_result is None:
-        # No parseable result means the provider failed to run, which is a
-        # different problem from it judging the input unusable.
-        raise CoreError(
-            Diagnostic(
-                rule_id="PARSE_PROVIDER_FAILED",
-                severity="error",
-                message="The extract provider produced no machine-readable result.",
-                location=str(source),
-                expected="one JSON line on stdout",
-                actual=f"exit code {completed.returncode}: "
-                       f"{summarize_output(completed.stderr, completed.stdout)}",
-                recovery="Re-run; if it persists, run the provider directly to see its output.",
-            ),
-            exit_code=EXIT_EXECUTION,
-        )
-
-    envelope.provider_result = provider_result
-    provider_status = str(provider_result.get("status") or "blocked")
-    envelope.status = EXTRACT_STATUS_MAP.get(provider_status, STATUS_FAILED)
-    envelope.extra["parse_status"] = provider_status
-    for key in ("tier", "fidelity"):
-        if key in provider_result:
-            envelope.extra[key] = provider_result[key]
-    _carry_diagnostics(envelope, provider_result)
-
-    if envelope.status == STATUS_FAILED:
-        envelope.add(
-            Diagnostic(
-                rule_id="PARSE_INPUT_UNUSABLE",
-                severity="error",
-                message=f"The provider could not produce a usable bundle ({provider_status}).",
-                location=str(source),
-                expected="a Parse Bundle",
-                actual=str(provider_result.get("reason") or provider_status),
-                recovery=str(provider_result.get("hint") or "")
-                or "Read provider_result for the question or blocker the provider reported.",
+        command = _build_command(resolution, source, parse_out, options)
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=options.timeout,
+                env={**_environ(cloud=options.mode == "cloud"), **resolution.env},
             )
-        )
-        # The provider ran and judged the input unusable — that is an input
-        # problem, not an execution failure.
-        return envelope, None, EXIT_INPUT
+        except subprocess.TimeoutExpired as error:
+            raise CoreError(
+                Diagnostic(
+                    rule_id="PARSE_TIMEOUT",
+                    severity="error",
+                    message=f"Parsing timed out after {options.timeout}s.",
+                    location=str(source),
+                    expected="a completed extraction",
+                    actual="the provider did not finish",
+                    recovery="Re-run with a longer --timeout, or use --max-pages.",
+                ),
+                exit_code=EXIT_EXECUTION,
+            ) from error
 
-    envelope.outputs = _bundle_outputs(out)
-    human = (
-        f"{provider_status} -> {out}\n"
-        f"tier={provider_result.get('tier')} "
-        f"recommended={(provider_result.get('decision') or {}).get('recommended')}"
-    ) if options.human else None
-    return envelope, human, EXIT_OK
+        provider_result = _last_json_line(completed.stdout)
+        if provider_result is None:
+            raise CoreError(
+                Diagnostic(
+                    rule_id="PARSE_PROVIDER_FAILED",
+                    severity="error",
+                    message="The extract provider produced no machine-readable result.",
+                    location=str(source),
+                    expected="one JSON line on stdout",
+                    actual=f"exit code {completed.returncode}: "
+                    f"{summarize_output(completed.stderr, completed.stdout)}",
+                    recovery="Re-run; if it persists, inspect the provider directly.",
+                ),
+                exit_code=EXIT_EXECUTION,
+            )
+
+        secrets = [str(parse_out), str(workdir)]
+        public_result = _public_provider_result(provider_result, secrets=secrets)
+        envelope.provider_result = public_result
+        provider_status = str(provider_result.get("status") or "blocked")
+        decision = provider_result.get("decision")
+        blocking = any(
+            isinstance(gap, dict) and gap.get("severity") == "blocking"
+            for gap in provider_result.get("gaps") or ()
+        )
+        importable = (
+            provider_status in {"parsed", "repairable"}
+            and isinstance(decision, dict)
+            and decision.get("usable") is True
+            and not blocking
+        )
+        envelope.status = (
+            EXTRACT_STATUS_MAP.get(provider_status, STATUS_FAILED)
+            if importable
+            else STATUS_FAILED
+        )
+        envelope.extra["parse_status"] = provider_status
+        for key in ("tier", "fidelity", "engine_acquisition"):
+            if key in public_result:
+                envelope.extra[key] = public_result[key]
+        _carry_diagnostics(envelope, public_result)
+
+        if not importable:
+            envelope.add(
+                Diagnostic(
+                    rule_id="PARSE_INPUT_UNUSABLE",
+                    severity="error",
+                    message=f"The provider could not produce usable source material ({provider_status}).",
+                    location=str(source),
+                    expected="decision.usable=true with no blocking gap",
+                    actual=str(provider_result.get("reason") or provider_status),
+                    recovery=str(provider_result.get("hint") or "")
+                    or "Inspect provider_result for the affected route and recovery.",
+                )
+            )
+            return envelope, None, EXIT_INPUT
+
+        try:
+            result = assemble_source_bundle(
+                project=project,
+                input_path=source,
+                parse_bundle=parse_out,
+                provider_result=provider_result,
+                brief=brief,
+                deck_language=options.deck_language,
+                title=options.title,
+                replace=options.replace,
+            )
+            validate_source_bundle(source_bundle)
+        except SourceBundleError as error:
+            raise _source_error(error, source_bundle) from error
+
+        envelope.extra.update(
+            {
+                "source_id": result["source_id"],
+                "material_id": result["material_id"],
+                "import_id": result["import_id"],
+                "previous_fingerprint": result["previous_fingerprint"],
+                "content_fingerprint": result["content_fingerprint"],
+            }
+        )
+        envelope.outputs = _bundle_outputs(source_bundle)
+        human = (
+            f"{provider_status} -> {source_bundle}\n"
+            f"tier={provider_result.get('tier')} "
+            f"recommended={(provider_result.get('decision') or {}).get('recommended')}"
+        ) if options.human else None
+        return envelope, human, EXIT_OK
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 _CLOUD_CREDENTIALS = (
-    "DECKFLOW_API_KEY", "DECKOPS_API_KEY",
-    "DECKFLOW_TOKEN", "DECKOPS_TOKEN",
-    "DECKFLOW_SPACE_ID", "DECKOPS_SPACE_ID",
+    "DECKFLOW_API_KEY",
+    "DECKOPS_API_KEY",
+    "DECKFLOW_TOKEN",
+    "DECKOPS_TOKEN",
+    "DECKFLOW_SPACE_ID",
+    "DECKOPS_SPACE_ID",
 )
 
 
 def _environ(*, cloud: bool) -> dict[str, str]:
-    """Withhold cloud credentials unless cloud mode was explicitly requested.
-
-    `--mode local` already forbids uploading. Removing the credentials as well
-    means a future change in provider defaults cannot turn a local parse into
-    one that ships the user's source material off the machine.
-
-    Since deckflow-extract 0.3 the provider also reads credentials from
-    `~/.deckflow/credentials`, the file it shares with DeckHTML — so removing
-    variables no longer removes anything on a machine where either tool has
-    been logged in. `DECKFLOW_NO_STORED_CREDENTIALS` is the provider's switch
-    for exactly this: it makes the environment the only source of truth, which
-    is what the stripping above assumes.
-    """
-    import os
-
     if cloud:
         environ = dict(os.environ)
     else:
@@ -373,4 +459,5 @@ def _environ(*, cloud: bool) -> dict[str, str]:
         }
         environ["DECKFLOW_NO_STORED_CREDENTIALS"] = "1"
     environ.update(credential_env())
+    environ["DECKFLOW_EXTRACT_HOME"] = str(deckflow_home() / "parse")
     return environ

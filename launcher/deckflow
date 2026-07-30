@@ -35,7 +35,7 @@ from pathlib import Path
 # The core release this Skill was built against. `deckflow update` may install
 # a newer one beside it; the newest managed version wins at startup.
 CORE_PACKAGE = "deckflow-core"
-CORE_VERSION = "0.3.0"
+CORE_VERSION = "0.3.1"
 CORE_MODULE = "deckflow_core"
 INDEX_URL = "https://pypi.org/simple"
 # Optional wheel URL tried after the index, for a core not published yet.

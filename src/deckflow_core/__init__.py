@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # 2 renamed the envelope's `providers[]` array to a single `extract{}` object,
 # dropped `pinned`, and added the `env` payload.  There were no 0.2.x users.
@@ -34,4 +34,4 @@ def schemas_dir() -> Path:
     return Path(__file__).parent / "schemas"
 
 
-__all__ = ["__version__", "SCHEMA_VERSION", "REQUIRES_PYTHON", "schemas_dir"]
+__all__ = ["REQUIRES_PYTHON", "SCHEMA_VERSION", "__version__", "schemas_dir"]
